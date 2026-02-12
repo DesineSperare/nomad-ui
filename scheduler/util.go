@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package scheduler
@@ -571,7 +571,7 @@ func setStatus(logger log.Logger, planner sstructs.Planner,
 // inplaceUpdate attempts to update allocations in-place where possible. It
 // returns the allocs that couldn't be done inplace and then those that could.
 func inplaceUpdate(ctx feasible.Context, eval *structs.Evaluation, job *structs.Job,
-	stack feasible.Stack, updates []reconciler.AllocTuple) (destructive, inplace []reconciler.AllocTuple) {
+	stack feasible.Stack, updates []reconciler.AllocTuple, dID string) (destructive, inplace []reconciler.AllocTuple) {
 
 	// doInplace manipulates the updates map to make the current allocation
 	// an inplace update.
@@ -684,6 +684,12 @@ func inplaceUpdate(ctx feasible.Context, eval *structs.Evaluation, job *structs.
 			},
 		}
 		newAlloc.Metrics = ctx.Metrics()
+
+		// Update the deployment ID for the alloc and remove
+		// any preexisting deployment status
+		newAlloc.DeploymentID = dID
+		newAlloc.DeploymentStatus = nil
+
 		ctx.Plan().AppendAlloc(newAlloc, nil)
 
 		// Remove this allocation from the slice
@@ -917,4 +923,29 @@ func genericAllocUpdateFn(ctx feasible.Context, stack feasible.Stack, evalID str
 		newAlloc.Metrics = existing.Metrics.Copy()
 		return false, false, newAlloc
 	}
+}
+
+// mergeNodeFiltered merges allocation metrics for task group
+func mergeNodeFiltered(acc, curr *structs.AllocMetric) *structs.AllocMetric {
+	if acc == nil {
+		return curr.Copy()
+	}
+
+	acc.NodesEvaluated += curr.NodesEvaluated
+	acc.NodesFiltered += curr.NodesFiltered
+
+	if acc.ClassFiltered == nil {
+		acc.ClassFiltered = make(map[string]int)
+	}
+	for k, v := range curr.ClassFiltered {
+		acc.ClassFiltered[k] += v
+	}
+	if acc.ConstraintFiltered == nil {
+		acc.ConstraintFiltered = make(map[string]int)
+	}
+	for k, v := range curr.ConstraintFiltered {
+		acc.ConstraintFiltered[k] += v
+	}
+	acc.AllocationTime += curr.AllocationTime
+	return acc
 }

@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package command
@@ -125,9 +125,14 @@ func (c *AllocStopCommand) Run(args []string) int {
 		return 1
 	}
 
-	var opts *api.QueryOptions
+	opts := &api.QueryOptions{Params: map[string]string{}}
+
+	if alloc.Stub().JobType == "batch" {
+		opts.Params["reschedule"] = "true"
+	}
+
 	if noShutdownDelay {
-		opts = &api.QueryOptions{Params: map[string]string{"no_shutdown_delay": "true"}}
+		opts.Params["no_shutdown_delay"] = "true"
 	}
 
 	resp, err := client.Allocations().Stop(alloc, opts)
@@ -141,7 +146,7 @@ func (c *AllocStopCommand) Run(args []string) int {
 		return 0
 	}
 
-	mon := newMonitor(c.Ui, client, length)
+	mon := newMonitor(c.Meta, client, length)
 	return mon.monitor(resp.EvalID)
 }
 

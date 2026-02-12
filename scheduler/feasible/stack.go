@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package feasible
@@ -352,6 +352,11 @@ func (s *SystemStack) Select(tg *structs.TaskGroup, options *SelectOptions) *Ran
 	// Reset the binpack selector and context
 	s.scoreNorm.Reset()
 	s.ctx.Reset()
+
+	// Since the system stack is always evaluating a single
+	// node, previous eligibility information is not applicable
+	// so reset it
+	s.ctx.Eligibility().Reset()
 	start := time.Now()
 
 	// Get the task groups constraints.

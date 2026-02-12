@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package allocrunner
@@ -737,23 +737,8 @@ func (ar *allocRunner) killTasks() map[string]*structs.TaskState {
 			return nil
 		}
 
-		te := structs.NewTaskEvent(structs.TaskKilling).
+		return structs.NewTaskEvent(structs.TaskKilling).
 			SetKillTimeout(tr.Task().KillTimeout, ar.clientConfig.MaxKillTimeout)
-
-		// if the task is not set failed, the job type is batch, and the
-		// allocation is being migrated then mark the task as failed. this
-		// ensures the task is recreated if no eligible nodes are immediately
-		// available.
-		if !tr.TaskState().Failed &&
-			ar.alloc.Job.Type == structs.JobTypeBatch &&
-			ar.alloc.DesiredTransition.Migrate != nil &&
-			*ar.alloc.DesiredTransition.Migrate {
-
-			ar.logger.Trace("marking migrating batch job task failed on kill", "task_name", tr.Task().Name)
-			te.SetFailsTask()
-		}
-
-		return te
 	}
 
 	// Kill leader first, synchronously
@@ -1329,9 +1314,11 @@ func (ar *allocRunner) LatestAllocStats(taskFilter string) (*cstructs.AllocResou
 
 		if usage := tr.LatestResourceUsage(); usage != nil {
 			astat.Tasks[name] = usage
-			astat.ResourceUsage.Add(usage.ResourceUsage)
-			if usage.Timestamp > astat.Timestamp {
-				astat.Timestamp = usage.Timestamp
+			if tr.IsRunning() {
+				astat.ResourceUsage.Add(usage.ResourceUsage)
+				if usage.Timestamp > astat.Timestamp {
+					astat.Timestamp = usage.Timestamp
+				}
 			}
 		}
 	}

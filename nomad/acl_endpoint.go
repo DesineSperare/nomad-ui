@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package nomad
@@ -2765,6 +2765,20 @@ func (a *ACL) OIDCCompleteAuth(
 	oidcProvider, err := a.oidcProviderCache.Get(authMethod)
 	if err != nil {
 		return fmt.Errorf("failed to generate OIDC provider: %v", err)
+	}
+
+	// Check if the OIDC provider requires the `iss` parameter to be
+	// validated
+	providerMetadata := struct {
+		AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
+	}{}
+	if err := oidcProvider.Claims(&providerMetadata); err != nil {
+		return fmt.Errorf("failed to retrieve OIDC provider metadata: %w", err)
+	}
+	if providerMetadata.AuthorizationResponseIssParameterSupported {
+		if args.Iss == "" || args.Iss != authMethod.Config.OIDCDiscoveryURL {
+			return errors.New("invalid or missing issuer parameter in callback")
+		}
 	}
 
 	// Retrieve the request generated in OIDCAuthURL()

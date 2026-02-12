@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package docker
@@ -2508,7 +2508,6 @@ func TestDockerDriver_AuthConfiguration(t *testing.T) {
 				Auth:          "eyJ1c2VybmFtZSI6InRlc3QiLCJwYXNzd29yZCI6IjEyMzQifQ==",
 				Username:      "test",
 				Password:      "1234",
-				Email:         "",
 				ServerAddress: "https://index.docker.io/v1/",
 			},
 		},
@@ -2518,7 +2517,6 @@ func TestDockerDriver_AuthConfiguration(t *testing.T) {
 				Auth:          "eyJ1c2VybmFtZSI6InRlc3QiLCJwYXNzd29yZCI6IjU2NzgifQ==",
 				Username:      "test",
 				Password:      "5678",
-				Email:         "",
 				ServerAddress: "quay.io",
 			},
 		},
@@ -2528,7 +2526,6 @@ func TestDockerDriver_AuthConfiguration(t *testing.T) {
 				Auth:          "eyJ1c2VybmFtZSI6InRlc3QiLCJwYXNzd29yZCI6ImFiY2QifQ==",
 				Username:      "test",
 				Password:      "abcd",
-				Email:         "",
 				ServerAddress: "https://other.io/v1/",
 			},
 		},
@@ -2558,31 +2555,15 @@ func TestDockerDriver_AuthFromTaskConfig(t *testing.T) {
 			Auth: DockerAuth{
 				Username:   "foo",
 				Password:   "bar",
-				Email:      "foo@bar.com",
 				ServerAddr: "www.foobar.com",
 			},
 			AuthConfig: &registry.AuthConfig{
 				Auth:          "eyJ1c2VybmFtZSI6ImZvbyIsInBhc3N3b3JkIjoiYmFyIn0=",
 				Username:      "foo",
 				Password:      "bar",
-				Email:         "foo@bar.com",
 				ServerAddress: "www.foobar.com",
 			},
 			Desc: "All fields set",
-		},
-		{
-			Auth: DockerAuth{
-				Username:   "foo",
-				Password:   "bar",
-				ServerAddr: "www.foobar.com",
-			},
-			AuthConfig: &registry.AuthConfig{
-				Auth:          "eyJ1c2VybmFtZSI6ImZvbyIsInBhc3N3b3JkIjoiYmFyIn0=",
-				Username:      "foo",
-				Password:      "bar",
-				ServerAddress: "www.foobar.com",
-			},
-			Desc: "Email not set",
 		},
 	}
 
@@ -3004,11 +2985,11 @@ func TestDockerDriver_memoryLimits(t *testing.T) {
 	ci.Parallel(t)
 
 	cases := []struct {
-		name           string
-		driverMemoryMB int64
-		taskResources  drivers.MemoryResources
-		expectedHard   int64
-		expectedSoft   int64
+		name             string
+		driverMemoryMB   int64
+		taskResources    drivers.MemoryResources
+		expectedHard     int64
+		expectedReserved int64
 	}{
 		{
 			"plain request",
@@ -3045,13 +3026,20 @@ func TestDockerDriver_memoryLimits(t *testing.T) {
 			30 * 1024 * 1024,
 			10 * 1024 * 1024,
 		},
+		{
+			"with reserved-only memory oversubscription",
+			20,
+			drivers.MemoryResources{MemoryMB: 20, MemoryMaxMB: -1},
+			0,
+			20 * 1024 * 1024,
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			hard, soft := memoryLimits(c.driverMemoryMB, c.taskResources)
+			hard, reserved := memoryLimits(c.driverMemoryMB, c.taskResources)
 			must.Eq(t, c.expectedHard, hard)
-			must.Eq(t, c.expectedSoft, soft)
+			must.Eq(t, c.expectedReserved, reserved)
 		})
 	}
 }

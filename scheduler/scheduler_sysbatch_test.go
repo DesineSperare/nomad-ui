@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package scheduler
@@ -427,6 +427,7 @@ func TestSysBatch_JobDeregister_Purged(t *testing.T) {
 
 	// Create a sysbatch job
 	job := mock.SystemBatchJob()
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job.Copy()))
 
 	var allocs []*structs.Allocation
 	for _, node := range nodes {
@@ -437,10 +438,10 @@ func TestSysBatch_JobDeregister_Purged(t *testing.T) {
 		alloc.Name = "my-sysbatch.pinger[0]"
 		allocs = append(allocs, alloc)
 	}
-	for _, alloc := range allocs {
-		must.NoError(t, h.State.UpsertJobSummary(h.NextIndex(), mock.JobSysBatchSummary(alloc.JobID)))
-	}
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
+
+	job.Stop = true
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job.Copy()))
 
 	// Create a mock evaluation to deregister the job
 	eval := &structs.Evaluation{
@@ -488,8 +489,7 @@ func TestSysBatch_JobDeregister_Stopped(t *testing.T) {
 
 	// Generate a stopped sysbatch job with allocations
 	job := mock.SystemBatchJob()
-	job.Stop = true
-	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job))
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job.Copy()))
 
 	var allocs []*structs.Allocation
 	for _, node := range nodes {
@@ -504,6 +504,10 @@ func TestSysBatch_JobDeregister_Stopped(t *testing.T) {
 		must.NoError(t, h.State.UpsertJobSummary(h.NextIndex(), mock.JobSysBatchSummary(alloc.JobID)))
 	}
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), allocs))
+
+	// Update the job to be stopped.
+	job.Stop = true
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job.Copy()))
 
 	// Create a mock evaluation to deregister the job
 	eval := &structs.Evaluation{
@@ -1122,7 +1126,7 @@ func TestSysBatch_JobConstraint_RunMultiple(t *testing.T) {
 	must.NoError(t, h.State.UpsertEvals(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Evaluation{eval}))
 
 	// Process the evaluation
-	err := h.Process(NewSystemScheduler, eval)
+	err := h.Process(NewSysBatchScheduler, eval)
 	must.NoError(t, err)
 
 	// Create a mock evaluation to run the job again, which will not place any
@@ -1138,7 +1142,7 @@ func TestSysBatch_JobConstraint_RunMultiple(t *testing.T) {
 	}
 	must.NoError(t, h.State.UpsertEvals(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Evaluation{eval2}))
 
-	err = h.Process(NewSystemScheduler, eval2)
+	err = h.Process(NewSysBatchScheduler, eval2)
 	must.NoError(t, err)
 
 	// Ensure a single plan
@@ -1686,6 +1690,8 @@ func TestSysBatch_Preemption(t *testing.T) {
 		},
 		Shared: structs.AllocatedSharedResources{DiskMB: 5 * 1024},
 	}
+
+	must.NoError(t, h.State.UpsertJob(structs.MsgTypeTestSetup, h.NextIndex(), nil, job3))
 	must.NoError(t, h.State.UpsertAllocs(structs.MsgTypeTestSetup, h.NextIndex(), []*structs.Allocation{alloc1, alloc2, alloc3}))
 
 	// Create a high priority job and allocs for it
@@ -1822,7 +1828,7 @@ func TestSysBatch_Preemption(t *testing.T) {
 func TestSysBatch_canHandle(t *testing.T) {
 	ci.Parallel(t)
 
-	s := SystemScheduler{sysbatch: true}
+	s := SysBatchScheduler{}
 	t.Run("sysbatch register", func(t *testing.T) {
 		must.True(t, s.canHandle(structs.EvalTriggerJobRegister))
 	})

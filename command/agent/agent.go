@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package agent
@@ -771,6 +771,12 @@ func (a *Agent) finalizeClientConfig(c *clientconfig.Config) error {
 		to configure Nomad to work with Consul.`)
 	}
 
+	// Log deprecation message about setting disk_free_mb
+	if c.DiskFreeMB != 0 {
+		a.logger.Warn(`disk_free_mb is deprecated and ignored by Nomad.
+		Please use client.reserved.disk to configure reservable disk for scheduling.`)
+	}
+
 	// If the operator has not set an intro token via the CLI or an environment
 	// variable, attempt to read the intro token from the file system. This
 	// cannot be used as a CLI override.
@@ -1079,6 +1085,16 @@ func convertClientConfig(agentConfig *Config) (*clientconfig.Config, error) {
 	conf.Drain = drainConfig
 
 	conf.Users = clientconfig.UsersConfigFromAgent(agentConfig.Client.Users)
+
+	// Iterate the fingerprinter configs and populate the client mapping. The
+	// validation function returns a suitable error that can be returned without
+	// formatting.
+	for _, fingerprinterCfg := range agentConfig.Client.Fingerprinters {
+		if err := fingerprinterCfg.Validate(); err != nil {
+			return nil, err
+		}
+		conf.Fingerprinters[fingerprinterCfg.Name] = fingerprinterCfg
+	}
 
 	conf.LogFile = agentConfig.LogFile
 	return conf, nil

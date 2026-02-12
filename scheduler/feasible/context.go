@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package feasible
@@ -250,6 +250,13 @@ func NewEvalEligibility() *EvalEligibility {
 		taskGroups:           make(map[string]map[string]ComputedClassFeasibility),
 		tgEscapedConstraints: make(map[string]bool),
 	}
+}
+
+// Reset clears the contents of the eval eligibility
+func (e *EvalEligibility) Reset() {
+	e.job = make(map[string]ComputedClassFeasibility)
+	e.taskGroups = make(map[string]map[string]ComputedClassFeasibility)
+	e.tgEscapedConstraints = make(map[string]bool)
 }
 
 // SetJob takes the job being evaluated and calculates the escaped constraints

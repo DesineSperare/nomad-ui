@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package nomad
@@ -33,7 +33,6 @@ import (
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/crypto"
 	"github.com/hashicorp/nomad/helper/joseutil"
-	"github.com/hashicorp/nomad/nomad/peers"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/nomad/structs/config"
 	"github.com/hashicorp/raft"
@@ -157,7 +156,7 @@ func (e *Encrypter) loadKeystore() error {
 
 	keyErrors := map[string]error{}
 
-	return filepath.Walk(e.keystorePath, func(path string, info fs.FileInfo, err error) error {
+	filepath.Walk(e.keystorePath, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("could not read path %s from keystore: %v", path, err)
 		}
@@ -186,8 +185,8 @@ func (e *Encrypter) loadKeystore() error {
 
 		key, err := e.loadKeyFromStore(path)
 		if err != nil {
-			keyErrors[id] = err
-			return fmt.Errorf("could not load key file %s from keystore: %w", path, err)
+			keyErrors[id] = fmt.Errorf("could not load key file %s from keystore: %w", path, err)
+			return nil
 		}
 		if key.Meta.KeyID != id {
 			return fmt.Errorf("root key ID %s must match key file %s", key.Meta.KeyID, path)
@@ -203,6 +202,16 @@ func (e *Encrypter) loadKeystore() error {
 		delete(keyErrors, id)
 		return nil
 	})
+
+	if len(keyErrors) == 0 {
+		return nil
+	}
+
+	var mErr multierror.Error
+	for _, err := range keyErrors {
+		mErr = *multierror.Append(&mErr, err)
+	}
+	return mErr.ErrorOrNil()
 }
 
 // IsReady blocks until all in-flight decrypt tasks are complete, or the context
@@ -1189,7 +1198,7 @@ func (krr *KeyringReplicator) replicateKey(ctx context.Context, wrappedKeys *str
 		cfg := krr.srv.GetConfig()
 		self := fmt.Sprintf("%s.%s", cfg.NodeName, cfg.Region)
 
-		for _, peer := range krr.getAllPeers() {
+		for _, peer := range krr.srv.peersCache.LocalPeers() {
 			if peer.Name == self {
 				continue
 			}
@@ -1221,14 +1230,4 @@ func (krr *KeyringReplicator) replicateKey(ctx context.Context, wrappedKeys *str
 
 	krr.logger.Debug("added key", "key", keyID)
 	return nil
-}
-
-func (krr *KeyringReplicator) getAllPeers() []*peers.Parts {
-	krr.srv.peerLock.RLock()
-	defer krr.srv.peerLock.RUnlock()
-	peers := make([]*peers.Parts, 0, len(krr.srv.localPeers))
-	for _, peer := range krr.srv.localPeers {
-		peers = append(peers, peer.Copy())
-	}
-	return peers
 }

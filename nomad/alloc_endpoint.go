@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package nomad
@@ -159,7 +159,9 @@ func (a *Alloc) GetAlloc(args *structs.AllocSpecificRequest,
 
 			// Setup the output
 			if out != nil {
-				out = out.Sanitize()
+				if out.SignedIdentities != nil {
+					out = out.Sanitize()
+				}
 				reply.Alloc = out
 				// Re-check namespace in case it differs from request.
 				if !aclObj.AllowClientOp() && !allowNsOp(aclObj, out.Namespace) {
@@ -307,6 +309,7 @@ func (a *Alloc) Stop(args *structs.AllocStopRequest, reply *structs.AllocStopRes
 			args.AllocID: {
 				Migrate:         pointer.Of(true),
 				NoShutdownDelay: pointer.Of(args.NoShutdownDelay),
+				Reschedule:      pointer.Of(args.Reschedule),
 			},
 		},
 	}

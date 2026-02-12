@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package command
@@ -1265,7 +1265,6 @@ namespace "default" {
 	}
 }
 
-// TODO(luiz): update once alloc restart supports -no-shutdown-delay.
 func TestJobRestartCommand_shutdownDelay_reschedule(t *testing.T) {
 	ci.Parallel(t)
 
@@ -1371,9 +1370,7 @@ func TestJobRestartCommand_shutdownDelay_reschedule(t *testing.T) {
 					if tc.shutdownDelay {
 						must.GreaterEq(t, shutdownDelay, time.Duration(diff))
 					} else {
-						// Add a bit of slack to account for the actual
-						// shutdown time of the task.
-						must.Between(t, shutdownDelay, time.Duration(diff), shutdownDelay+time.Second)
+						must.Less(t, shutdownDelay, time.Duration(diff))
 					}
 				}
 			}

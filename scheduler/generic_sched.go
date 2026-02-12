@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package scheduler
@@ -13,7 +13,6 @@ import (
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -35,9 +34,6 @@ const (
 	// that we track when unlimited rescheduling is enabled
 	maxPastRescheduleEvents = 5
 )
-
-// minVersionMaxClientDisconnect is the minimum version that supports max_client_disconnect.
-var minVersionMaxClientDisconnect = version.Must(version.NewVersion("1.3.0"))
 
 // SetStatusError is used to set the status of the evaluation to the given error
 type SetStatusError struct {
@@ -124,7 +120,7 @@ func (s *GenericScheduler) Process(eval *structs.Evaluation) (err error) {
 	switch eval.TriggeredBy {
 	case structs.EvalTriggerJobRegister, structs.EvalTriggerJobDeregister,
 		structs.EvalTriggerNodeDrain, structs.EvalTriggerNodeUpdate,
-		structs.EvalTriggerAllocStop,
+		structs.EvalTriggerAllocStop, structs.EvalTriggerAllocReschedule,
 		structs.EvalTriggerRollingUpdate, structs.EvalTriggerQueuedAllocs,
 		structs.EvalTriggerPeriodicJob, structs.EvalTriggerMaxPlans,
 		structs.EvalTriggerDeploymentWatcher, structs.EvalTriggerRetryFailedAlloc,
@@ -355,9 +351,8 @@ func (s *GenericScheduler) computeJobAllocs() error {
 			EvalPriority:      s.eval.Priority,
 		},
 		reconciler.ClusterState{
-			TaintedNodes:                tainted,
-			SupportsDisconnectedClients: s.planner.ServersMeetMinimumVersion(minVersionMaxClientDisconnect, true),
-			Now:                         time.Now().UTC(),
+			TaintedNodes: tainted,
+			Now:          time.Now().UTC(),
 		})
 	result := r.Compute()
 	if s.logger.IsDebug() {
@@ -707,10 +702,8 @@ func (s *GenericScheduler) computePlacements(
 				// blocked eval without dropping the reschedule tracker
 				if prevAllocation != nil {
 					if missing.IsRescheduling() {
-						updatedPrevAllocation := prevAllocation.Copy()
 						missing.SetPreviousAllocation(prevAllocation)
-						annotateRescheduleTracker(updatedPrevAllocation, structs.LastRescheduleFailedToPlace)
-						swapAllocInPlan(s.plan, prevAllocation, updatedPrevAllocation)
+						markFailedToReschedule(s.plan, prevAllocation, s.job)
 					}
 				}
 
@@ -720,6 +713,25 @@ func (s *GenericScheduler) computePlacements(
 	}
 
 	return nil
+}
+
+// markFailedToReschedule takes a "previous" allocation that we were unable to
+// reschedule and updates the plan to annotate its reschedule tracker and to
+// move it out of the stop list and into the update list so that we don't drop
+// tracking information in the plan applier
+func markFailedToReschedule(plan *structs.Plan, original *structs.Allocation, job *structs.Job) {
+	updated := original.Copy()
+	annotateRescheduleTracker(updated, structs.LastRescheduleFailedToPlace)
+
+	plan.PopUpdate(original)
+	nodeID := original.NodeID
+	for i, alloc := range plan.NodeAllocation[nodeID] {
+		if alloc.ID == original.ID {
+			plan.NodeAllocation[nodeID][i] = updated
+			return
+		}
+	}
+	plan.AppendAlloc(updated, job)
 }
 
 // swapAllocInPlan updates a plan to swap out an allocation that's already in

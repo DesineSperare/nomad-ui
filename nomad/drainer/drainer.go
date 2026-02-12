@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2015, 2025
 // SPDX-License-Identifier: BUSL-1.1
 
 package drainer
@@ -400,6 +400,13 @@ func (n *NodeDrainer) drainAllocs(future *structs.BatchFuture, allocs []*structs
 	for _, alloc := range allocs {
 		transitions[alloc.ID] = &structs.DesiredTransition{
 			Migrate: pointer.Of(true),
+		}
+
+		// When draining batch job allocations, the allocation should be
+		// be stopped. Setting this ensures the allocation is stopped in
+		// the migration process, but that a new allocation is not placed.
+		if alloc.Job.Type == structs.JobTypeBatch {
+			transitions[alloc.ID].MigrateDisablePlacement = pointer.Of(true)
 		}
 		jobs[alloc.JobNamespacedID()] = alloc.Job
 	}
