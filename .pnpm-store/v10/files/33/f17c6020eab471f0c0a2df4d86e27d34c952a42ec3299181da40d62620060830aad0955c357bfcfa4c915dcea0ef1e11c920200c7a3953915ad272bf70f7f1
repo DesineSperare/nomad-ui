@@ -1,0 +1,52 @@
+{
+  "name": "ember-cli-funnel",
+  "version": "0.6.1",
+  "description": "Exclude files from an ember build",
+  "keywords": [
+    "broccoli",
+    "ember-addon",
+    "funnel"
+  ],
+  "repository": "https://github.com/kellyselden/ember-cli-funnel.git",
+  "license": "MIT",
+  "author": "Kelly Selden",
+  "directories": {
+    "doc": "doc",
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "ember build",
+    "lint:js": "eslint .",
+    "start": "ember serve",
+    "test": "ember test"
+  },
+  "dependencies": {
+    "broccoli-funnel": "^2.0.0"
+  },
+  "devDependencies": {
+    "ember-cli": "~3.1.4",
+    "ember-cli-babel": "^6.3.0",
+    "ember-cli-dependency-checker": "^2.0.0",
+    "ember-cli-eslint": "^4.2.1",
+    "ember-cli-htmlbars": "^2.0.1",
+    "ember-cli-inject-live-reload": "^1.4.1",
+    "ember-cli-qunit": "^4.3.2",
+    "ember-cli-shims": "^1.2.0",
+    "ember-load-initializers": "^1.1.0",
+    "ember-maybe-import-regenerator": "^0.1.6",
+    "ember-resolver": "^4.0.0",
+    "ember-source": "~3.2.0",
+    "eslint-plugin-ember": "^5.0.0",
+    "eslint-plugin-node": "^6.0.1",
+    "loader.js": "^4.2.3",
+    "my-addon": "file:./lib/my-addon",
+    "qunit-dom": "^0.6.2"
+  },
+  "engines": {
+    "node": "6.* || 8.* || >= 10.*"
+  },
+  "ember-addon": {
+    "configPath": "tests/dummy/config",
+    "paths": []
+  }
+}

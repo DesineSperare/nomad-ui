@@ -3,12 +3,14 @@
 
 scenario "upgrade" {
   description = <<-EOF
-    The upgrade scenario verifies in-place upgrades between previously released
-    versions of Nomad against another candidate build.
+    The upgrade scenario verifies in-place upgrades between previously released versions of Nomad
+    against another candidate build.
     EOF
 
   matrix {
-    arch    = ["amd64"]
+    arch = ["amd64"]
+    //edition = ["ce", "ent"]
+    //os      = ["linux", "windows"]
     edition = ["ent"]
     os      = ["linux"]
 
@@ -18,10 +20,6 @@ scenario "upgrade" {
     }
   }
 
-  # note that we can't use the step.provision_cluster output to configure a
-  # dynamic provider config for Nomad, Consul, or Vault because the Enos
-  # provider block is not quite the same as a Terraform provider block and
-  # doesn't support the lazy reference
   providers = [
     provider.aws.default,
   ]
@@ -88,7 +86,8 @@ scenario "upgrade" {
     depends_on = [step.provision_cluster]
 
     description = <<-EOF
-    Verify the health of the cluster by checking the status of all servers and nodes
+    Verify the health of the cluster by checking the status of all servers, nodes,
+    jobs and allocs and stopping random allocs to check for correct reschedules"
     EOF
 
     module = module.test_cluster_health
@@ -103,6 +102,8 @@ scenario "upgrade" {
       # configuring assertions
       server_count    = var.server_count
       client_count    = local.clients_count
+      jobs_count      = 0
+      alloc_count     = 0
       servers         = step.provision_cluster.servers
       clients_version = local.test_product_version
       servers_version = local.test_product_version
@@ -112,6 +113,9 @@ scenario "upgrade" {
       quality.nomad_agent_info,
       quality.nomad_agent_info_self,
       quality.nomad_nodes_status,
+      quality.nomad_job_status,
+      quality.nomad_allocs_status,
+      quality.nomad_reschedule_alloc,
     ]
   }
 
@@ -132,20 +136,18 @@ scenario "upgrade" {
     EOF
 
     module = module.run_workloads
-
     variables {
-      # connecting to the Nomad API
-      nomad_addr  = step.provision_cluster.nomad_addr
-      ca_file     = step.provision_cluster.ca_file
-      cert_file   = step.provision_cluster.cert_file
-      key_file    = step.provision_cluster.key_file
-      nomad_token = step.provision_cluster.nomad_token
-
-      # connecting to supporting APIs
-      consul_addr      = step.provision_cluster.consul_addr
-      consul_token     = step.provision_cluster.consul_token
-      vault_token      = step.get_vault_env.vault_token
-      vault_addr       = step.get_vault_env.vault_addr
+      nomad_addr        = step.provision_cluster.nomad_addr
+      ca_file           = step.provision_cluster.ca_file
+      cert_file         = step.provision_cluster.cert_file
+      key_file          = step.provision_cluster.key_file
+      nomad_token       = step.provision_cluster.nomad_token
+      availability_zone = var.availability_zone
+      consul_addr       = step.provision_cluster.consul_addr
+      consul_token      = step.provision_cluster.consul_token
+      vault_token       = step.get_vault_env.vault_token
+      vault_addr        = step.get_vault_env.vault_addr
+      // The provision_cluster module enables a kv v2 secrets engine using the cluster name as path.
       vault_mount_path = step.provision_cluster.cluster_unique_identifier
 
       workloads = {
@@ -212,15 +214,15 @@ scenario "upgrade" {
     ]
   }
 
-  step "test_initial_workload_health" {
+  step "workloads_test_cluster_health" {
     depends_on = [step.run_initial_workloads]
 
     description = <<-EOF
-    Verify the health of workloads by checking the status of jobs and allocs,
-    and stop random allocs to check for correct reschedule behavior
+    Verify the health of the cluster by checking the status of all servers, nodes,
+    jobs and allocs and stopping random allocs to check for correct reschedules"
     EOF
 
-    module = module.test_workload_health
+    module = module.test_cluster_health
     variables {
       # connecting to the Nomad API
       nomad_addr  = step.provision_cluster.nomad_addr
@@ -230,15 +232,19 @@ scenario "upgrade" {
       nomad_token = step.provision_cluster.nomad_token
 
       # configuring assertions
-      jobs          = step.run_initial_workloads.jobs
-      service_jobs  = step.run_initial_workloads.service_jobs
-      batch_jobs    = step.run_initial_workloads.batch_jobs
-      system_jobs   = step.run_initial_workloads.system_jobs
-      sysbatch_jobs = step.run_initial_workloads.sysbatch_jobs
-      client_count  = local.clients_count
+      server_count    = var.server_count
+      client_count    = local.clients_count
+      jobs_count      = step.run_initial_workloads.jobs_count
+      alloc_count     = step.run_initial_workloads.allocs_count
+      servers         = step.provision_cluster.servers
+      clients_version = local.test_product_version
+      servers_version = local.test_product_version
     }
 
     verifies = [
+      quality.nomad_agent_info,
+      quality.nomad_agent_info_self,
+      quality.nomad_nodes_status,
       quality.nomad_job_status,
       quality.nomad_allocs_status,
       quality.nomad_reschedule_alloc,
@@ -246,7 +252,7 @@ scenario "upgrade" {
   }
 
   step "fetch_upgrade_binary" {
-    depends_on = [step.test_initial_workload_health]
+    depends_on = [step.provision_cluster, step.workloads_test_cluster_health]
 
     description = <<-EOF
     Determine which Nomad artifact we want to use for the scenario, depending on the
@@ -311,11 +317,12 @@ scenario "upgrade" {
     }
   }
 
-  step "post_server_upgrade_test_cluster_health" {
+  step "server_upgrade_test_cluster_health" {
     depends_on = [step.upgrade_servers]
 
     description = <<-EOF
-    Verify the health of the cluster by checking the status of all servers and nodes
+    Verify the health of the cluster by checking the status of all servers, nodes,
+    jobs and allocs and stopping random allocs to check for correct reschedules"
     EOF
 
     module = module.test_cluster_health
@@ -330,6 +337,8 @@ scenario "upgrade" {
       # configuring assertions
       server_count    = var.server_count
       client_count    = local.clients_count
+      jobs_count      = step.run_initial_workloads.jobs_count
+      alloc_count     = step.run_initial_workloads.allocs_count
       servers         = step.provision_cluster.servers
       clients_version = local.test_product_version
       servers_version = local.test_upgrade_version
@@ -339,48 +348,14 @@ scenario "upgrade" {
       quality.nomad_agent_info,
       quality.nomad_agent_info_self,
       quality.nomad_nodes_status,
-    ]
-  }
-
-  step "post_server_upgrade_test_workload_health" {
-    depends_on = [step.upgrade_servers]
-
-    description = <<-EOF
-    Verify the health of workloads by checking the status of jobs and allocs,
-    and stop random allocs to check for correct reschedule behavior
-    EOF
-
-    module = module.test_workload_health
-    variables {
-      # connecting to the Nomad API
-      nomad_addr  = step.provision_cluster.nomad_addr
-      ca_file     = step.provision_cluster.ca_file
-      cert_file   = step.provision_cluster.cert_file
-      key_file    = step.provision_cluster.key_file
-      nomad_token = step.provision_cluster.nomad_token
-
-      # configuring assertions
-      jobs          = step.run_initial_workloads.jobs
-      service_jobs  = step.run_initial_workloads.service_jobs
-      batch_jobs    = step.run_initial_workloads.batch_jobs
-      system_jobs   = step.run_initial_workloads.system_jobs
-      sysbatch_jobs = step.run_initial_workloads.sysbatch_jobs
-      client_count  = local.clients_count
-    }
-
-    verifies = [
       quality.nomad_job_status,
       quality.nomad_allocs_status,
       quality.nomad_reschedule_alloc,
     ]
   }
 
-
   step "upgrade_first_client" {
-    depends_on = [
-      step.post_server_upgrade_test_cluster_health,
-      step.post_server_upgrade_test_workload_health
-    ]
+    depends_on = [step.server_upgrade_test_cluster_health]
 
     description = <<-EOF
     Takes a client, writes some dynamic metadata to it,
@@ -567,11 +542,12 @@ scenario "upgrade" {
     }
   }
 
-  step "post_client_upgrade_test_cluster_health" {
+  step "client_upgrade_test_cluster_health" {
     depends_on = [step.upgrade_fourth_client]
 
     description = <<-EOF
-    Verify the health of the cluster by checking the status of all servers and nodes
+    Verify the health of the cluster by checking the status of all servers, nodes,
+    jobs and allocs and stopping random allocs to check for correct reschedules"
     EOF
 
     module = module.test_cluster_health
@@ -586,6 +562,8 @@ scenario "upgrade" {
       # configuring assertions
       server_count    = var.server_count
       client_count    = local.clients_count
+      jobs_count      = step.run_initial_workloads.jobs_count
+      alloc_count     = step.run_initial_workloads.allocs_count
       servers         = step.provision_cluster.servers
       clients_version = local.test_upgrade_version
       servers_version = local.test_upgrade_version
@@ -595,36 +573,6 @@ scenario "upgrade" {
       quality.nomad_agent_info,
       quality.nomad_agent_info_self,
       quality.nomad_nodes_status,
-    ]
-  }
-
-  step "post_client_upgrade_test_workload_health" {
-    depends_on = [step.upgrade_fourth_client]
-
-    description = <<-EOF
-    Verify the health of workloads by checking the status of jobs and allocs,
-    and stop random allocs to check for correct reschedule behavior
-    EOF
-
-    module = module.test_workload_health
-    variables {
-      # connecting to the Nomad API
-      nomad_addr  = step.provision_cluster.nomad_addr
-      ca_file     = step.provision_cluster.ca_file
-      cert_file   = step.provision_cluster.cert_file
-      key_file    = step.provision_cluster.key_file
-      nomad_token = step.provision_cluster.nomad_token
-
-      # configuring assertions
-      jobs          = step.run_initial_workloads.jobs
-      service_jobs  = step.run_initial_workloads.service_jobs
-      batch_jobs    = step.run_initial_workloads.batch_jobs
-      system_jobs   = step.run_initial_workloads.system_jobs
-      sysbatch_jobs = step.run_initial_workloads.sysbatch_jobs
-      client_count  = local.clients_count
-    }
-
-    verifies = [
       quality.nomad_job_status,
       quality.nomad_allocs_status,
       quality.nomad_reschedule_alloc,
@@ -674,5 +622,17 @@ scenario "upgrade" {
 
   output "binary_path" {
     value = step.copy_initial_binary.binary_path
+  }
+
+  output "allocs" {
+    value = step.run_initial_workloads.allocs_count
+  }
+
+  output "new_allocs" {
+    value = step.run_initial_workloads.new_allocs_count
+  }
+
+  output "nodes" {
+    value = step.run_initial_workloads.nodes
   }
 }

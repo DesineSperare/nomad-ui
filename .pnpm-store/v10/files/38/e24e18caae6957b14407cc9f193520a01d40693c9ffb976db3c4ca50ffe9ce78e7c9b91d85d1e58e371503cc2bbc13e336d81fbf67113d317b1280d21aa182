@@ -1,0 +1,6 @@
+import Component from '@glimmer/component';
+import { Validator } from 'prop-types';
+export default function arg<T extends Component>(target: T, key: string): any;
+export default function arg(typeValidator?: Validator<any>, ...args: any[]): PropertyDecorator;
+export declare function forbidExtraArgs(target: any): any;
+//# sourceMappingURL=decorator.d.ts.map

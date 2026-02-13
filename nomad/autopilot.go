@@ -6,6 +6,7 @@ package nomad
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/hashicorp/nomad/helper"
@@ -100,7 +101,7 @@ func (d *AutopilotDelegate) RemoveFailedServer(failedSrv *autopilot.Server) {
 // MinRaftProtocol returns the lowest supported Raft protocol among alive
 // servers
 func (s *Server) MinRaftProtocol() (int, error) {
-	return minRaftProtocol(s.peersCache.RegionPeers(s.Region()))
+	return minRaftProtocol(s.serf.Members(), peers.IsNomadServer)
 }
 
 // GetClusterHealth is used to get the current health of the servers, as known
@@ -171,15 +172,32 @@ func stringIDs(ids []raft.ServerID) []string {
 	return helper.ConvertSlice(ids, func(id raft.ServerID) string { return string(id) })
 }
 
-func minRaftProtocol(members []*peers.Parts) (int, error) {
+func minRaftProtocol(members []serf.Member, serverFunc func(serf.Member) (bool, *peers.Parts)) (int, error) {
 	minVersion := -1
 	for _, m := range members {
 		if m.Status != serf.StatusAlive {
 			continue
 		}
 
-		if minVersion == -1 || m.RaftVersion < minVersion {
-			minVersion = m.RaftVersion
+		ok, server := serverFunc(m)
+		if !ok {
+			return -1, fmt.Errorf("not a Nomad server")
+		}
+		if server == nil {
+			continue
+		}
+
+		vsn, ok := m.Tags["raft_vsn"]
+		if !ok {
+			vsn = "1"
+		}
+		raftVsn, err := strconv.Atoi(vsn)
+		if err != nil {
+			return -1, err
+		}
+
+		if minVersion == -1 || raftVsn < minVersion {
+			minVersion = raftVsn
 		}
 	}
 
@@ -191,22 +209,37 @@ func minRaftProtocol(members []*peers.Parts) (int, error) {
 }
 
 func (s *Server) autopilotServers() map[raft.ServerID]*autopilot.Server {
+	servers := make(map[raft.ServerID]*autopilot.Server)
 
-	// Get a list of the regional peers for our local region. We cannot use the
-	// LocalPeers function, as we need peers in all states.
-	localPeers := s.peersCache.RegionPeers(s.Region())
+	for _, member := range s.serf.Members() {
+		srv, err := s.autopilotServer(member)
+		if err != nil {
+			s.logger.Warn("Error parsing server info", "name", member.Name, "error", err)
+			continue
+		} else if srv == nil {
+			// this member was a client or in another region
+			continue
+		}
 
-	servers := make(map[raft.ServerID]*autopilot.Server, len(localPeers))
-
-	for _, srv := range localPeers {
-		autopilotServer := s.autopilotServerFromMetadata(srv)
-		servers[autopilotServer.ID] = autopilotServer
+		servers[srv.ID] = srv
 	}
 
 	return servers
 }
 
-func (s *Server) autopilotServerFromMetadata(srv *peers.Parts) *autopilot.Server {
+func (s *Server) autopilotServer(m serf.Member) (*autopilot.Server, error) {
+	ok, srv := peers.IsNomadServer(m)
+	if !ok {
+		return nil, nil
+	}
+	if srv.Region != s.Region() {
+		return nil, nil
+	}
+
+	return s.autopilotServerFromMetadata(srv)
+}
+
+func (s *Server) autopilotServerFromMetadata(srv *peers.Parts) (*autopilot.Server, error) {
 	server := &autopilot.Server{
 		Name:        srv.Name,
 		ID:          raft.ServerID(srv.ID),
@@ -214,7 +247,6 @@ func (s *Server) autopilotServerFromMetadata(srv *peers.Parts) *autopilot.Server
 		Version:     srv.Build.String(),
 		RaftVersion: srv.RaftVersion,
 		Ext:         s.autopilotServerExt(srv),
-		Meta:        srv.Tags,
 	}
 
 	switch srv.Status {
@@ -230,5 +262,13 @@ func (s *Server) autopilotServerFromMetadata(srv *peers.Parts) *autopilot.Server
 		server.NodeStatus = autopilot.NodeUnknown
 	}
 
-	return server
+	members := s.serf.Members()
+	for _, member := range members {
+		if member.Name == srv.Name {
+			server.Meta = member.Tags
+			break
+		}
+	}
+
+	return server, nil
 }

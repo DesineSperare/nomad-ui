@@ -48,11 +48,13 @@ ui/.sass-cache
 ui/static/base.css
 
 ui/static/application.min.js
+ui/dist/
 
 *.swp
 *.iml
 
 website/.bundle
+website/vendor
 
 # Go work files
 go.work
@@ -86,6 +88,7 @@ rkt-*
 # UI rules
 
 # compiled output
+/ui/dist
 /ui/tmp
 
 # dependencies

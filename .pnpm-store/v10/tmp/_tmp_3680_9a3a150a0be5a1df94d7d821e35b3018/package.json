@@ -1,0 +1,40 @@
+{
+  "name": "eslint-plugin-ember-a11y-testing",
+  "version": "0.0.0",
+  "description": "ESLint plugin for ember-a11y-testing",
+  "keywords": [
+    "eslint",
+    "eslintplugin",
+    "eslint-plugin"
+  ],
+  "author": "Jamie White",
+  "main": "lib/index.js",
+  "scripts": {
+    "lint:fix": "eslint --ext js,md --fix .",
+    "test": "eslint --ext js,md . && mocha tests --recursive"
+  },
+  "dependencies": {
+    "requireindex": "~1.1.0"
+  },
+  "devDependencies": {
+    "common-tags": "^1.8.0",
+    "eslint": "^6.8.0",
+    "eslint-config-prettier": "^6.11.0",
+    "eslint-plugin-markdown": "^1.0.2",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-prettier": "^3.1.3",
+    "eslint-plugin-yaml": "^0.1.3",
+    "mocha": "^6.0.0",
+    "mocha-junit-reporter": "^1.23.3",
+    "prettier": "^2.0.5"
+  },
+  "engines": {
+    "node": ">= 8.3.0"
+  },
+  "license": "ISC",
+  "files": [
+    "README.md",
+    "lib/**/*.js",
+    "package.json"
+  ]
+}

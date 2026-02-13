@@ -1,0 +1,119 @@
+import { _ as _defineProperty } from '../defineProperty-1e8516b1.js';
+import Service from '@ember/service';
+import { assert } from '@ember/debug';
+import { next } from '@ember/runloop';
+import { TrackedMap } from 'tracked-maps-and-sets';
+
+function _classApplyDescriptorGet(receiver, descriptor) {
+  if (descriptor.get) {
+    return descriptor.get.call(receiver);
+  }
+
+  return descriptor.value;
+}
+
+function _classExtractFieldDescriptor(receiver, privateMap, action) {
+  if (!privateMap.has(receiver)) {
+    throw new TypeError("attempted to " + action + " private field on non-instance");
+  }
+
+  return privateMap.get(receiver);
+}
+
+function _classPrivateFieldGet(receiver, privateMap) {
+  var descriptor = _classExtractFieldDescriptor(receiver, privateMap, "get");
+  return _classApplyDescriptorGet(receiver, descriptor);
+}
+
+function _classPrivateFieldInitSpec(obj, privateMap, value) { _checkPrivateRedeclaration(obj, privateMap); privateMap.set(obj, value); }
+
+function _checkPrivateRedeclaration(obj, privateCollection) { if (privateCollection.has(obj)) { throw new TypeError("Cannot initialize the same private elements twice on an object"); } }
+
+class TargetTracker {
+  constructor(name, element, options) {
+    _defineProperty(this, "name", void 0);
+
+    _defineProperty(this, "element", void 0);
+
+    _defineProperty(this, "multiple", void 0);
+
+    _defineProperty(this, "onChange", void 0);
+
+    this.name = name;
+    this.element = element;
+    this.multiple = options.multiple ?? false;
+    this.onChange = options.onChange;
+  }
+
+}
+
+var _targets = /*#__PURE__*/new WeakMap();
+
+var _portalCount = /*#__PURE__*/new WeakMap();
+
+class PortalService extends Service {
+  constructor(...args) {
+    super(...args);
+
+    _classPrivateFieldInitSpec(this, _targets, {
+      writable: true,
+      value: new TrackedMap()
+    });
+
+    _classPrivateFieldInitSpec(this, _portalCount, {
+      writable: true,
+      value: new TrackedMap()
+    });
+  }
+
+  getTarget(name) {
+    return _classPrivateFieldGet(this, _targets).get(name);
+  }
+
+  getPortalCount(name) {
+    return _classPrivateFieldGet(this, _portalCount).get(name) ?? 0;
+  }
+
+  registerTarget(name, element, options) {
+    next(this, () => {
+      assert(`Portal target with name ${name} already exists`, !_classPrivateFieldGet(this, _targets).has(name));
+
+      _classPrivateFieldGet(this, _targets).set(name, new TargetTracker(name, element, options));
+    });
+  }
+
+  unregisterTarget(name) {
+    _classPrivateFieldGet(this, _targets).delete(name);
+  }
+
+  registerPortal(name) {
+    next(this, () => {
+      const count = (_classPrivateFieldGet(this, _portalCount).get(name) ?? 0) + 1;
+
+      _classPrivateFieldGet(this, _portalCount).set(name, count);
+
+      const target = _classPrivateFieldGet(this, _targets).get(name);
+
+      if (target && target.onChange) {
+        target.onChange(count);
+      }
+    });
+  }
+
+  unregisterPortal(name) {
+    let count = _classPrivateFieldGet(this, _portalCount).get(name) ?? 0;
+    assert(`Trying to unregister a portal "${name}" that hasn't been registered before`, count > 0);
+    count--;
+
+    _classPrivateFieldGet(this, _portalCount).set(name, count);
+
+    const target = _classPrivateFieldGet(this, _targets).get(name);
+
+    if (target && target.onChange) {
+      target.onChange(count);
+    }
+  }
+
+} // DO NOT DELETE: this is how TypeScript knows how to look up your services.
+
+export { PortalService as default };

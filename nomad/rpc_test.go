@@ -338,10 +338,12 @@ func TestRPC_streamingRpcConn_badMethod(t *testing.T) {
 	testutil.WaitForLeader(t, s1.RPC)
 	testutil.WaitForLeader(t, s2.RPC)
 
+	s1.peerLock.RLock()
 	ok, parts := peers.IsNomadServer(s2.LocalMember())
 	require.True(ok)
-	server := s1.peersCache.LocalPeer(raft.ServerAddress(parts.Addr.String()))
+	server := s1.localPeers[raft.ServerAddress(parts.Addr.String())]
 	require.NotNil(server)
+	s1.peerLock.RUnlock()
 
 	conn, err := s1.streamingRpc(server, "Bogus")
 	require.Nil(conn)
@@ -395,10 +397,12 @@ func TestRPC_streamingRpcConn_badMethod_TLS(t *testing.T) {
 	TestJoin(t, s1, s2)
 	testutil.WaitForLeader(t, s1.RPC)
 
+	s1.peerLock.RLock()
 	ok, parts := peers.IsNomadServer(s2.LocalMember())
 	require.True(ok)
-	server := s1.peersCache.LocalPeer(raft.ServerAddress(parts.Addr.String()))
+	server := s1.localPeers[raft.ServerAddress(parts.Addr.String())]
 	require.NotNil(server)
+	s1.peerLock.RUnlock()
 
 	conn, err := s1.streamingRpc(server, "Bogus")
 	require.Nil(conn)
@@ -430,10 +434,12 @@ func TestRPC_streamingRpcConn_goodMethod_Plaintext(t *testing.T) {
 	TestJoin(t, s1, s2)
 	testutil.WaitForLeader(t, s1.RPC)
 
+	s1.peerLock.RLock()
 	ok, parts := peers.IsNomadServer(s2.LocalMember())
 	require.True(ok)
-	server := s1.peersCache.LocalPeer(raft.ServerAddress(parts.Addr.String()))
+	server := s1.localPeers[raft.ServerAddress(parts.Addr.String())]
 	require.NotNil(server)
+	s1.peerLock.RUnlock()
 
 	conn, err := s1.streamingRpc(server, "FileSystem.Logs")
 	require.NotNil(conn)
@@ -501,10 +507,12 @@ func TestRPC_streamingRpcConn_goodMethod_TLS(t *testing.T) {
 	TestJoin(t, s1, s2)
 	testutil.WaitForLeader(t, s1.RPC)
 
+	s1.peerLock.RLock()
 	ok, parts := peers.IsNomadServer(s2.LocalMember())
 	require.True(ok)
-	server := s1.peersCache.LocalPeer(raft.ServerAddress(parts.Addr.String()))
+	server := s1.localPeers[raft.ServerAddress(parts.Addr.String())]
 	require.NotNil(server)
+	s1.peerLock.RUnlock()
 
 	conn, err := s1.streamingRpc(server, "FileSystem.Logs")
 	require.NotNil(conn)

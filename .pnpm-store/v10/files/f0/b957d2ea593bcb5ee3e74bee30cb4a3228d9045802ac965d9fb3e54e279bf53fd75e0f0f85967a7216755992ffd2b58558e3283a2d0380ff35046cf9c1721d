@@ -1,0 +1,30 @@
+import Component from '@glimmer/component';
+import { Resource } from 'ember-resources';
+import PortalService from "../services/-portal";
+import { Target } from "../services/-portal";
+interface PortalTrackerResourceArgs {
+    Positional: [string];
+}
+declare class PortalTrackerResource extends Resource<PortalTrackerResourceArgs> {
+    portalService: PortalService;
+    _target?: string;
+    constructor(owner: unknown);
+    get target(): Target | undefined;
+    modify([newTarget]: [string]): void;
+}
+interface PortalSignature {
+    Args: {
+        target: string;
+        renderInPlace?: boolean;
+        fallback?: 'inplace';
+    };
+    Blocks: {
+        default: [];
+    };
+}
+declare class Portal extends Component<PortalSignature> {
+    tracker: PortalTrackerResource;
+    get target(): Target | undefined;
+    get renderInPlace(): boolean;
+}
+export { Portal as default };

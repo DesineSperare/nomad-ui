@@ -1,0 +1,44 @@
+import { _ as _applyDecoratedDescriptor, a as _initializerDefineProperty } from '../applyDecoratedDescriptor-cd7b9b1b.js';
+import { setComponentTemplate } from '@ember/component';
+import { hbs } from 'ember-cli-htmlbars';
+import Component from '@glimmer/component';
+import { action } from '@ember/object';
+import { inject } from '@ember/service';
+import { assert } from '@ember/debug';
+
+var TEMPLATE = hbs("<div\n  {{did-insert this.register}}\n  {{will-destroy this.unregister}}\n  ...attributes\n>\n  {{yield this.count}}\n</div>");
+
+var _dec, _class, _descriptor;
+let PortalTarget = (_dec = inject('-portal'), (_class = class PortalTarget extends Component {
+  constructor(...args) {
+    super(...args);
+
+    _initializerDefineProperty(this, "portalService", _descriptor, this);
+  }
+
+  get count() {
+    return this.portalService.getPortalCount(this.args.name);
+  }
+
+  register(element) {
+    assert('PortalTargets needs a name', this.args.name);
+    const options = {
+      multiple: this.args.multiple,
+      onChange: this.args.onChange
+    };
+    this.portalService.registerTarget(this.args.name, element, options);
+  }
+
+  unregister() {
+    this.portalService.unregisterTarget(this.args.name);
+  }
+
+}, (_descriptor = _applyDecoratedDescriptor(_class.prototype, "portalService", [_dec], {
+  configurable: true,
+  enumerable: true,
+  writable: true,
+  initializer: null
+}), _applyDecoratedDescriptor(_class.prototype, "register", [action], Object.getOwnPropertyDescriptor(_class.prototype, "register"), _class.prototype), _applyDecoratedDescriptor(_class.prototype, "unregister", [action], Object.getOwnPropertyDescriptor(_class.prototype, "unregister"), _class.prototype)), _class));
+setComponentTemplate(TEMPLATE, PortalTarget);
+
+export { PortalTarget as default };

@@ -6,7 +6,7 @@ variable "alloc_count" {
   default = 1
 }
 
-job "service-raw-exec" {
+job "service-raw" {
 
   group "service-raw" {
     count = var.alloc_count

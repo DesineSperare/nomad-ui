@@ -1,0 +1,4 @@
+declare type ThrowConsoleError = (fn: () => void, enabled: boolean) => void;
+declare let throwConsoleError: ThrowConsoleError;
+export default throwConsoleError;
+//# sourceMappingURL=throw-console-error.d.ts.map

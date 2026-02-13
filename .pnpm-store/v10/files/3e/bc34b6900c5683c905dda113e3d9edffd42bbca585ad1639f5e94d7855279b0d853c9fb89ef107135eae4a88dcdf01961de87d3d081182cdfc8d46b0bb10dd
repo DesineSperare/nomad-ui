@@ -1,0 +1,79 @@
+{
+  "name": "@percy/ember",
+  "version": "4.2.0",
+  "description": "Ember client library for visual testing with Percy",
+  "keywords": [
+    "ember-addon",
+    "percy",
+    "visual testing"
+  ],
+  "repository": "https://github.com/percy/ember-percy",
+  "license": "MIT",
+  "author": "Perceptual Inc.",
+  "types": "types/index.d.ts",
+  "directories": {
+    "doc": "doc",
+    "test": "tests"
+  },
+  "engines": {
+    "node": ">= 14"
+  },
+  "scripts": {
+    "build": "ember build --environment=production",
+    "lint": "npm-run-all --aggregate-output --continue-on-error --parallel lint:*",
+    "lint:hbs": "ember-template-lint .",
+    "lint:js": "eslint .",
+    "start": "ember serve",
+    "test": "percy exec --testing -- ember test",
+    "test:all": "ember try:each",
+    "test:types": "tsd"
+  },
+  "ember": {
+    "edition": "octane"
+  },
+  "ember-addon": {
+    "configPath": "tests/dummy/config"
+  },
+  "dependencies": {
+    "@percy/sdk-utils": "^1.18.0",
+    "ember-cli-babel": "^7.26.11"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.13.14",
+    "@ember/optional-features": "^2.0.0",
+    "@ember/test-helpers": "^2.2.5",
+    "@glimmer/component": "^1.0.4",
+    "@glimmer/tracking": "^1.0.4",
+    "@percy/cli": "^1.18.0",
+    "@types/mocha": "^10.0.0",
+    "@types/qunit": "^2.11.1",
+    "babel-eslint": "^10.1.0",
+    "broccoli-asset-rev": "^3.0.0",
+    "ember-auto-import": "^2.0.2",
+    "ember-cli": "~4.8.0",
+    "ember-cli-dependency-checker": "^3.2.0",
+    "ember-cli-htmlbars": "^6.0.0",
+    "ember-cli-inject-live-reload": "^2.0.2",
+    "ember-cli-sri": "^2.1.1",
+    "ember-cli-terser": "^4.0.1",
+    "ember-disable-prototype-extensions": "^1.1.3",
+    "ember-export-application-global": "^2.0.1",
+    "ember-load-initializers": "^2.1.2",
+    "ember-maybe-import-regenerator": "^1.0.0",
+    "ember-qunit": "^6.0.0",
+    "ember-resolver": "^8.0.2",
+    "ember-source": "~4.8.0",
+    "ember-source-channel-url": "^3.0.0",
+    "ember-template-lint": "^5.3.2",
+    "ember-try": "^2.0.0",
+    "eslint": "^7.23.0",
+    "eslint-plugin-ember": "^11.0.2",
+    "eslint-plugin-node": "^11.1.0",
+    "loader.js": "^4.7.0",
+    "npm-run-all": "^4.1.5",
+    "qunit": "^2.14.1",
+    "qunit-dom": "^2.0.0",
+    "tsd": "^0.24.1",
+    "webpack": "5"
+  }
+}

@@ -2,7 +2,7 @@
 # Copyright IBM Corp. 2015, 2025
 # SPDX-License-Identifier: BUSL-1.1
 
-set -euo pipefail
+set -xeuo pipefail
 
 TIMEOUT=10
 INTERVAL=2

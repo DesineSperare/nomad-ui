@@ -1,0 +1,158 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const tslib_1 = require("tslib");
+const path_1 = tslib_1.__importDefault(require("path"));
+const tmp_1 = tslib_1.__importDefault(require("tmp"));
+const express_1 = tslib_1.__importDefault(require("express"));
+const node_fetch_1 = tslib_1.__importDefault(require("node-fetch"));
+const fs_extra_1 = tslib_1.__importDefault(require("fs-extra"));
+const index_1 = require("./index");
+function createTmpDir() {
+    return tmp_1.default.dirSync({ unsafeCleanup: true }).name;
+}
+describe('setupMiddleware', () => {
+    let tmpDir;
+    let app;
+    let server;
+    beforeEach(() => {
+        tmpDir = createTmpDir();
+        app = express_1.default();
+    });
+    afterEach(function () {
+        server.close();
+    });
+    it('can write a report using defaults', async () => {
+        index_1.setupMiddleware(app, { root: tmpDir, name: 'foo' });
+        server = app.listen(3000);
+        const data = [{ foo: 'bar' }];
+        const json = await node_fetch_1.default('http://localhost:3000/foo', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+        }).then((res) => res.json());
+        expect(json.outputPath).toMatch(/.*foo\/.*\.json$/);
+        expect(fs_extra_1.default.readJSONSync(json.outputPath)).toStrictEqual(data);
+    });
+    it('can write a report via custom urlPath', async () => {
+        index_1.setupMiddleware(app, { root: tmpDir, name: 'foo', urlPath: '/baz' });
+        server = app.listen(3000);
+        const data = [{ foo: 'bar' }];
+        const json = await node_fetch_1.default('http://localhost:3000/baz', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+        }).then((res) => res.json());
+        expect(json.outputPath).toMatch(/.*foo\/.*\.json$/);
+        expect(fs_extra_1.default.readJSONSync(json.outputPath)).toStrictEqual(data);
+    });
+    it('can write a report via custom urlPath when urlPath does not include preceeding slash', async () => {
+        index_1.setupMiddleware(app, { root: tmpDir, name: 'foo', urlPath: 'baz' });
+        server = app.listen(3000);
+        const data = [{ foo: 'bar' }];
+        const json = await node_fetch_1.default('http://localhost:3000/baz', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+        }).then((res) => res.json());
+        expect(json.outputPath).toMatch(/.*foo\/.*\.json$/);
+        expect(fs_extra_1.default.readJSONSync(json.outputPath)).toStrictEqual(data);
+    });
+    it('can write a report via custom reportDir', async () => {
+        index_1.setupMiddleware(app, {
+            root: tmpDir,
+            name: 'foo',
+            reportDir: 'my-reports',
+        });
+        server = app.listen(3000);
+        const data = [{ foo: 'bar' }];
+        const json = await node_fetch_1.default('http://localhost:3000/foo', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+        }).then((res) => res.json());
+        expect(json.outputPath).toMatch(/.*my-reports\/.*\.json$/);
+        expect(fs_extra_1.default.readJSONSync(json.outputPath)).toStrictEqual(data);
+    });
+});
+describe('buildRootFromOptions', () => {
+    let tmpDir;
+    beforeEach(() => {
+        tmpDir = createTmpDir();
+    });
+    it('can build a root path from options when root is provided', () => {
+        const options = {
+            name: 'foo',
+            root: tmpDir,
+        };
+        const root = index_1.buildRootFromOptions(options);
+        expect(root).toBe(tmpDir);
+    });
+    it('can build a root path from options', () => {
+        const options = {
+            name: 'bar',
+            root: './foo',
+        };
+        const root = index_1.buildRootFromOptions(options);
+        expect(root).toBe('./foo');
+    });
+});
+describe('buildUrlPathFromOptions', () => {
+    it('can build a url from options when no urlPath is provided', () => {
+        const options = {
+            name: 'foo',
+        };
+        const url = index_1.buildUrlPathFromOptions(options);
+        expect(url).toBe('/foo');
+    });
+    it('can build a url from options when urlPath is provided with no preceeding slash', () => {
+        const options = {
+            name: 'foo',
+            urlPath: 'bar',
+        };
+        const url = index_1.buildUrlPathFromOptions(options);
+        expect(url).toBe('/bar');
+    });
+    it('can build a url from options when urlPath is provided', () => {
+        const options = {
+            name: 'foo',
+            urlPath: '/bar',
+        };
+        const url = index_1.buildUrlPathFromOptions(options);
+        expect(url).toBe('/bar');
+    });
+});
+describe('buildReportDirFromOptions', () => {
+    it('can build a reportDir from options when no reportDir is provided', () => {
+        const options = {
+            name: 'foo',
+        };
+        const reportDir = index_1.buildReportDirFromOptions(options);
+        expect(reportDir).toBe(path_1.default.join(process.cwd(), 'foo'));
+    });
+    it('can build a reportDir from options when reportDir is provided', () => {
+        const options = {
+            name: 'foo',
+            reportDir: 'bar',
+        };
+        const reportDir = index_1.buildReportDirFromOptions(options);
+        expect(reportDir).toBe(path_1.default.join(process.cwd(), 'bar'));
+    });
+    it('can build a reportDir from options when reportDir and root are provided', () => {
+        const options = {
+            name: 'foo',
+            reportDir: 'bar',
+            root: './baz',
+        };
+        const reportDir = index_1.buildReportDirFromOptions(options);
+        expect(reportDir).toBe(path_1.default.join('./baz', 'bar'));
+    });
+});
+//# sourceMappingURL=index.test.js.map

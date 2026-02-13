@@ -1,0 +1,4 @@
+declare type Closest = (str: string, options: string[]) => string | undefined;
+export declare let closest: Closest;
+export {};
+//# sourceMappingURL=closest-string.d.ts.map

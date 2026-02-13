@@ -156,15 +156,28 @@ func (s *Server) serverWithNodeConn(nodeID, region string) (*peers.Parts, error)
 	}
 
 	// Select the list of servers to check based on what region we are querying
-	var targets []*peers.Parts
+	s.peerLock.RLock()
+
+	var rawTargets []*peers.Parts
 	if region == s.Region() {
-		targets = s.peersCache.LocalPeers()
+		rawTargets = make([]*peers.Parts, 0, len(s.localPeers))
+		for _, srv := range s.localPeers {
+			rawTargets = append(rawTargets, srv)
+		}
 	} else {
-		targets = s.peersCache.RegionPeers(region)
-		if targets == nil {
+		peers, ok := s.peers[region]
+		if !ok {
+			s.peerLock.RUnlock()
 			return nil, structs.ErrNoRegionPath
 		}
+		rawTargets = peers
 	}
+
+	targets := make([]*peers.Parts, 0, len(rawTargets))
+	for _, target := range rawTargets {
+		targets = append(targets, target.Copy())
+	}
+	s.peerLock.RUnlock()
 
 	// connections is used to store the servers that have connections to the
 	// requested node.

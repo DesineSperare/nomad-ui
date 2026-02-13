@@ -14,7 +14,6 @@ import (
 	"github.com/hashicorp/nomad/testutil"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/serf/serf"
-	"github.com/shoenig/test/must"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,43 +30,41 @@ func TestNomad_JoinPeer(t *testing.T) {
 
 	testutil.WaitForResult(func() (bool, error) {
 		if members := s1.Members(); len(members) != 2 {
-			return false, fmt.Errorf("expected 2 members in region %q, got %v",
-				s1.Region(), len(members))
+			return false, fmt.Errorf("bad: %#v", members)
 		}
 		if members := s2.Members(); len(members) != 2 {
-			return false, fmt.Errorf("expected 2 members in region %q, got %v",
-				s1.Region(), len(members))
+			return false, fmt.Errorf("bad: %#v", members)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 
 	testutil.WaitForResult(func() (bool, error) {
-		n1 := s1.peersCache.RegionNum()
-		local1 := len(s1.peersCache.LocalPeers())
+		s1.peerLock.Lock()
+		n1 := len(s1.peers)
+		local1 := len(s1.localPeers)
+		s1.peerLock.Unlock()
 		if n1 != 2 {
-			return false, fmt.Errorf("expected 2 peer regions in %q, got %v",
-				s1.Region(), n1)
+			return false, fmt.Errorf("bad: %#v", n1)
 		}
 		if local1 != 1 {
-			return false, fmt.Errorf("expected 1 local peer in %q, got %v",
-				s1.Region(), local1)
+			return false, fmt.Errorf("bad: %#v", local1)
 		}
 
-		n2 := s2.peersCache.RegionNum()
-		local2 := len(s2.peersCache.LocalPeers())
+		s2.peerLock.Lock()
+		n2 := len(s2.peers)
+		local2 := len(s2.localPeers)
+		s2.peerLock.Unlock()
 		if n2 != 2 {
-			return false, fmt.Errorf("expected 2 peer regions in %q, got %v",
-				s2.Region(), n2)
+			return false, fmt.Errorf("bad: %#v", n2)
 		}
 		if local2 != 1 {
-			return false, fmt.Errorf("expected 1 local peer in %q, got %v",
-				s2.Region(), local2)
+			return false, fmt.Errorf("bad: %#v", local2)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 }
 
@@ -84,34 +81,30 @@ func TestNomad_RemovePeer(t *testing.T) {
 
 	testutil.WaitForResult(func() (bool, error) {
 		if members := s1.Members(); len(members) != 2 {
-			return false, fmt.Errorf("expected 2 members in region %q, got %v",
-				s1.Region(), len(members))
+			return false, fmt.Errorf("bad: %#v", members)
 		}
 		if members := s2.Members(); len(members) != 2 {
-			return false, fmt.Errorf("expected 2 members in region %q, got %v",
-				s2.Region(), len(members))
+			return false, fmt.Errorf("bad: %#v", members)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 
 	// Leave immediately
-	must.NoError(t, s2.Leave())
-	must.NoError(t, s2.Shutdown())
+	s2.Leave()
+	s2.Shutdown()
 
 	testutil.WaitForResult(func() (bool, error) {
-		if s1Peers := s1.peersCache.RegionPeers(s1.Region()); len(s1Peers) != 1 {
-			return false, fmt.Errorf("expected 1 peer in region %q, got %v",
-				s1.Region(), len(s1Peers))
+		if len(s1.peers) != 1 {
+			return false, fmt.Errorf("bad: %#v", s1.peers)
 		}
-		if s2Peers := s2.peersCache.RegionPeers(s2.Region()); len(s2Peers) != 1 {
-			return false, fmt.Errorf("expected 1 peer in region %q, got %v",
-				s2.Region(), len(s2Peers))
+		if len(s2.peers) != 1 {
+			return false, fmt.Errorf("bad: %#v", s2.peers)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 }
 
@@ -150,20 +143,17 @@ func TestNomad_ReapPeer(t *testing.T) {
 		// Retry the join to decrease flakiness
 		TestJoin(t, s1, s2, s3)
 		if members := s1.Members(); len(members) != 3 {
-			return false, fmt.Errorf("expected 3 members in region %q, got %v",
-				s1.Region(), len(members))
+			return false, fmt.Errorf("bad s1: %#v", members)
 		}
 		if members := s2.Members(); len(members) != 3 {
-			return false, fmt.Errorf("expected 3 members in region %q, got %v",
-				s2.Region(), len(members))
+			return false, fmt.Errorf("bad s2: %#v", members)
 		}
 		if members := s3.Members(); len(members) != 3 {
-			return false, fmt.Errorf("expected 3 members in region %q, got %v",
-				s3.Region(), len(members))
+			return false, fmt.Errorf("bad s3: %#v", members)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 
 	testutil.WaitForLeader(t, s1.RPC)
@@ -186,32 +176,36 @@ func TestNomad_ReapPeer(t *testing.T) {
 	s3.reconcileCh <- s2mem
 
 	testutil.WaitForResult(func() (bool, error) {
-		n1 := len(s1.peersCache.RegionPeers("global"))
+		s1.peerLock.Lock()
+		n1 := len(s1.peers["global"])
+		s1.peerLock.Unlock()
 		if n1 != 2 {
-			return false, fmt.Errorf("expected 2 peers in region \"global\", got %v", n1)
+			return false, fmt.Errorf("bad: %#v", n1)
 		}
 		peers, err := s1.numPeers()
 		if err != nil {
-			return false, fmt.Errorf("failed to get peer num: %v", err)
+			return false, fmt.Errorf("numPeers() failed: %v", err)
 		}
 		if peers != 2 {
-			return false, fmt.Errorf("expected 2 peers in region %q, got %v", s1.Region(), peers)
+			return false, fmt.Errorf("bad: %#v", peers)
 		}
 
-		n3 := len(s3.peersCache.RegionPeers("global"))
+		s3.peerLock.Lock()
+		n3 := len(s3.peers["global"])
+		s3.peerLock.Unlock()
 		if n3 != 2 {
-			return false, fmt.Errorf("expected 2 peers in region \"global\", got %v", n3)
+			return false, fmt.Errorf("bad: %#v", n3)
 		}
 		peers, err = s3.numPeers()
 		if err != nil {
-			return false, fmt.Errorf("failed to get peer num: %v", err)
+			return false, fmt.Errorf("numPeers() failed: %v", err)
 		}
 		if peers != 2 {
-			return false, fmt.Errorf("expected 2 peers in region %q, got %v", s3.Region(), peers)
+			return false, fmt.Errorf("bad: %#v", peers)
 		}
 		return true, nil
 	}, func(err error) {
-		t.Fatalf("error: %v", err)
+		t.Fatalf("err: %v", err)
 	})
 }
 
@@ -370,11 +364,8 @@ func TestNomad_BootstrapExpect_NonVoter(t *testing.T) {
 			if peers != expect {
 				return false, fmt.Errorf("expected %d peers, got %d", expect, peers)
 			}
-			if localPeers := s.peersCache.LocalPeers(); len(localPeers) != expect {
-				return false, fmt.Errorf(
-					"expected %d local peers, got %d: %#v",
-					expect, len(localPeers), localPeers,
-				)
+			if len(s.localPeers) != expect {
+				return false, fmt.Errorf("expected %d local peers, got %d: %#v", expect, len(s.localPeers), s.localPeers)
 			}
 
 		}
@@ -440,7 +431,9 @@ func TestNomad_NonBootstraping_ShouldntBootstap(t *testing.T) {
 	defer cleanupS1()
 
 	testutil.WaitForResult(func() (bool, error) {
-		p := len(s1.peersCache.LocalPeers())
+		s1.peerLock.Lock()
+		p := len(s1.localPeers)
+		s1.peerLock.Unlock()
 		if p != 1 {
 			return false, fmt.Errorf("%d", p)
 		}

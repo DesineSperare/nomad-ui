@@ -33,6 +33,7 @@ import (
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/crypto"
 	"github.com/hashicorp/nomad/helper/joseutil"
+	"github.com/hashicorp/nomad/nomad/peers"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/nomad/structs/config"
 	"github.com/hashicorp/raft"
@@ -1198,7 +1199,7 @@ func (krr *KeyringReplicator) replicateKey(ctx context.Context, wrappedKeys *str
 		cfg := krr.srv.GetConfig()
 		self := fmt.Sprintf("%s.%s", cfg.NodeName, cfg.Region)
 
-		for _, peer := range krr.srv.peersCache.LocalPeers() {
+		for _, peer := range krr.getAllPeers() {
 			if peer.Name == self {
 				continue
 			}
@@ -1230,4 +1231,14 @@ func (krr *KeyringReplicator) replicateKey(ctx context.Context, wrappedKeys *str
 
 	krr.logger.Debug("added key", "key", keyID)
 	return nil
+}
+
+func (krr *KeyringReplicator) getAllPeers() []*peers.Parts {
+	krr.srv.peerLock.RLock()
+	defer krr.srv.peerLock.RUnlock()
+	peers := make([]*peers.Parts, 0, len(krr.srv.localPeers))
+	for _, peer := range krr.srv.localPeers {
+		peers = append(peers, peer.Copy())
+	}
+	return peers
 }

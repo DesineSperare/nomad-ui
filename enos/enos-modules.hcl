@@ -17,10 +17,6 @@ module "test_cluster_health" {
   source = "./modules/test_cluster_health"
 }
 
-module "test_workload_health" {
-  source = "./modules/test_workload_health"
-}
-
 module "upgrade_servers" {
   source = "./modules/upgrade_servers"
 }
