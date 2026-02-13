@@ -6,21 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
-	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/cgroups/fs2"
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/cgroups/fs2"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
 	"github.com/opencontainers/runc/libcontainer/internal/userns"
@@ -95,48 +99,292 @@ func (c *processComm) closeParent() {
 	// c.logPipeParent is kept alive for ForwardLogs
 }
 
-type setnsProcess struct {
-	cmd             *exec.Cmd
-	comm            *processComm
-	cgroupPaths     map[string]string
-	rootlessCgroups bool
-	manager         cgroups.Manager
-	intelRdtPath    string
-	config          *initConfig
-	fds             []string
-	process         *Process
-	bootstrapData   io.Reader
-	initProcessPid  int
+type containerProcess struct {
+	cmd           *exec.Cmd
+	comm          *processComm
+	config        *initConfig
+	manager       cgroups.Manager
+	fds           []string
+	process       *Process
+	bootstrapData io.Reader
+	container     *Container
 }
 
-func (p *setnsProcess) startTime() (uint64, error) {
+func (p *containerProcess) pid() int {
+	return p.cmd.Process.Pid
+}
+
+func (p *containerProcess) startTime() (uint64, error) {
 	stat, err := system.Stat(p.pid())
 	return stat.StartTime, err
 }
 
-func (p *setnsProcess) signal(sig os.Signal) error {
-	s, ok := sig.(unix.Signal)
-	if !ok {
-		return errors.New("os: unsupported signal type")
+func (p *containerProcess) signal(sig os.Signal) error {
+	return p.cmd.Process.Signal(sig)
+}
+
+func (p *containerProcess) externalDescriptors() []string {
+	return p.fds
+}
+
+func (p *containerProcess) setExternalDescriptors(newFds []string) {
+	p.fds = newFds
+}
+
+func (p *containerProcess) forwardChildLogs() chan error {
+	return logs.ForwardLogs(p.comm.logPipeParent)
+}
+
+// terminate sends a SIGKILL to the forked process for the setns routine then waits to
+// avoid the process becoming a zombie.
+func (p *containerProcess) terminate() error {
+	if p.cmd.Process == nil {
+		return nil
 	}
-	return unix.Kill(p.pid(), s)
+	err := p.cmd.Process.Kill()
+	if _, werr := p.wait(); err == nil {
+		err = werr
+	}
+	return err
+}
+
+func (p *containerProcess) wait() (*os.ProcessState, error) { //nolint:unparam
+	err := p.cmd.Wait()
+
+	// Return actual ProcessState even on Wait error
+	return p.cmd.ProcessState, err
+}
+
+type setnsProcess struct {
+	containerProcess
+	rootlessCgroups bool
+	intelRdtPath    string
+	initProcessPid  int
+}
+
+// tryResetCPUAffinity tries to reset the CPU affinity of the process
+// identified by pid to include all possible CPUs (notwithstanding cgroup
+// cpuset restrictions and isolated CPUs).
+func tryResetCPUAffinity(pid int) {
+	// When resetting the CPU affinity, we want to match the configured cgroup
+	// cpuset (or the default set of all CPUs, if no cpuset is configured)
+	// rather than some more restrictive affinity we were spawned in (such as
+	// one that may have been inherited from systemd). The cpuset cgroup used
+	// to reconfigure the cpumask automatically for joining processes, but
+	// kcommit da019032819a ("sched: Enforce user requested affinity") changed
+	// this behaviour in Linux 6.2.
+	//
+	// Parsing cpuset.cpus.effective is quite inefficient (and looking at
+	// things like /proc/stat would be wrong for most nested containers), but
+	// luckily sched_setaffinity(2) will implicitly:
+	//
+	//  * Clamp the cpumask so that it matches the current number of CPUs on
+	//    the system.
+	//  * Mask out any CPUs that are not a member of the target task's
+	//    configured cgroup cpuset.
+	//
+	// So we can just pass a very large array of set cpumask bits and the
+	// kernel will silently convert that to the correct value very cheaply.
+	var cpuset unix.CPUSet
+	cpuset.Fill() // set all bits
+	if err := unix.SchedSetaffinity(pid, &cpuset); err != nil {
+		logrus.WithError(
+			os.NewSyscallError("sched_setaffinity", err),
+		).Warnf("resetting the CPU affinity of pid %d failed -- the container process may inherit runc's CPU affinity", pid)
+	}
+}
+
+// Starts setns process with specified initial CPU affinity.
+func (p *setnsProcess) startWithCPUAffinity() error {
+	aff := p.config.CPUAffinity
+	if aff == nil || aff.Initial == nil {
+		return p.cmd.Start()
+	}
+	errCh := make(chan error)
+	defer close(errCh)
+
+	// Use a goroutine to dedicate an OS thread.
+	go func() {
+		runtime.LockOSThread()
+		// Command inherits the CPU affinity.
+		if err := unix.SchedSetaffinity(unix.Gettid(), aff.Initial); err != nil {
+			errCh <- fmt.Errorf("error setting initial CPU affinity: %w", err)
+			return
+		}
+
+		errCh <- p.cmd.Start()
+		// Deliberately omit runtime.UnlockOSThread here.
+		// https://pkg.go.dev/runtime#LockOSThread says:
+		// "If the calling goroutine exits without unlocking the
+		// thread, the thread will be terminated".
+	}()
+
+	return <-errCh
+}
+
+func (p *setnsProcess) setFinalCPUAffinity() error {
+	aff := p.config.CPUAffinity
+	// If there was no affinity configured at all, we want to reset
+	// the affinity to make sure we don't inherit an unexpected one.
+	if aff == nil || aff.Final == nil && aff.Initial == nil {
+		tryResetCPUAffinity(p.pid())
+		return nil
+	}
+	if aff.Final == nil {
+		return nil
+	}
+	if err := unix.SchedSetaffinity(p.pid(), aff.Final); err != nil {
+		return fmt.Errorf("error setting final CPU affinity: %w", err)
+	}
+	return nil
+}
+
+func (p *setnsProcess) addIntoCgroupV1() error {
+	if sub, ok := p.process.SubCgroupPaths[""]; ok || len(p.process.SubCgroupPaths) == 0 {
+		// Either same sub-cgroup for all paths, or no sub-cgroup.
+		err := p.manager.AddPid(sub, p.pid())
+		if err != nil && !p.rootlessCgroups {
+			return fmt.Errorf("error adding pid %d to cgroups: %w", p.pid(), err)
+		}
+		return nil
+	}
+
+	// Per-controller sub-cgroup paths. Not supported by AddPid (or systemd),
+	// so we have to calculate and check all sub-cgroup paths, and write
+	// directly to cgroupfs.
+	paths := maps.Clone(p.manager.GetPaths())
+	for ctrl, sub := range p.process.SubCgroupPaths {
+		base, ok := paths[ctrl]
+		if !ok {
+			return fmt.Errorf("unknown controller %s in SubCgroupPaths", ctrl)
+		}
+		cgPath := path.Join(base, sub)
+		if !strings.HasPrefix(cgPath, base) {
+			return fmt.Errorf("bad sub cgroup path: %s", sub)
+		}
+		paths[ctrl] = cgPath
+	}
+
+	for _, path := range paths {
+		if err := cgroups.WriteCgroupProc(path, p.pid()); err != nil && !p.rootlessCgroups {
+			return fmt.Errorf("error adding pid %d to cgroups: %w", p.pid(), err)
+		}
+	}
+
+	return nil
+}
+
+func (p *setnsProcess) addIntoCgroupV2() error {
+	sub := p.process.SubCgroupPaths[""]
+	err := p.manager.AddPid(sub, p.pid())
+	if err != nil && !p.rootlessCgroups {
+		// On cgroup v2 + nesting + domain controllers, adding to initial cgroup may fail with EBUSY.
+		// https://github.com/opencontainers/runc/issues/2356#issuecomment-621277643
+		// Try to join the cgroup of InitProcessPid, unless sub-cgroup is explicitly set.
+		if p.initProcessPid != 0 && sub == "" {
+			initProcCgroupFile := fmt.Sprintf("/proc/%d/cgroup", p.initProcessPid)
+			initCg, initCgErr := cgroups.ParseCgroupFile(initProcCgroupFile)
+			if initCgErr == nil {
+				if initCgPath, ok := initCg[""]; ok {
+					initCgDirpath := filepath.Join(fs2.UnifiedMountpoint, initCgPath)
+					logrus.Debugf("adding pid %d to cgroup failed (%v), attempting to join %s",
+						p.pid(), err, initCgDirpath)
+					// NOTE: initCgDirPath is not guaranteed to exist because we didn't pause the container.
+					err = cgroups.WriteCgroupProc(initCgDirpath, p.pid())
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("error adding pid %d to cgroups: %w", p.pid(), err)
+		}
+	}
+
+	return nil
+}
+
+func (p *setnsProcess) addIntoCgroup() error {
+	if p.cmd.SysProcAttr.UseCgroupFD {
+		// We've used cgroupfd successfully, so the process is
+		// already in the proper cgroup, nothing to do here.
+		return nil
+	}
+	if cgroups.IsCgroup2UnifiedMode() {
+		return p.addIntoCgroupV2()
+	}
+	return p.addIntoCgroupV1()
+}
+
+// prepareCgroupFD sets up p.cmd to use clone3 with CLONE_INTO_CGROUP
+// to join cgroup early, in p.cmd.Start. Returns an *os.File which
+// must be closed by the caller after p.Cmd.Start return.
+func (p *setnsProcess) prepareCgroupFD() (*os.File, error) {
+	if !cgroups.IsCgroup2UnifiedMode() {
+		return nil, nil
+	}
+
+	base := p.manager.Path("")
+	if base == "" { // No cgroup to join.
+		return nil, nil
+	}
+	sub := ""
+	if p.process.SubCgroupPaths != nil {
+		sub = p.process.SubCgroupPaths[""]
+	}
+	cgroup := path.Join(base, sub)
+	if !strings.HasPrefix(cgroup, base) {
+		return nil, fmt.Errorf("bad sub cgroup path: %s", sub)
+	}
+
+	fd, err := cgroups.OpenFile(base, sub, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC)
+	if err != nil {
+		if p.rootlessCgroups {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("can't open cgroup: %w", err)
+	}
+
+	logrus.Debugf("using CLONE_INTO_CGROUP %q", cgroup)
+	if p.cmd.SysProcAttr == nil {
+		p.cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	p.cmd.SysProcAttr.UseCgroupFD = true
+	p.cmd.SysProcAttr.CgroupFD = int(fd.Fd())
+
+	return fd, nil
+}
+
+// startWithCgroupFD starts a process via clone3 with CLONE_INTO_CGROUP,
+// with a fallback if it fails (e.g. not available).
+func (p *setnsProcess) startWithCgroupFD() error {
+	// Close the child side of the pipes.
+	defer p.comm.closeChild()
+
+	fd, err := p.prepareCgroupFD()
+	if err != nil {
+		return err
+	}
+	if fd != nil {
+		defer fd.Close()
+	}
+
+	err = p.startWithCPUAffinity()
+	if err != nil && p.cmd.SysProcAttr.UseCgroupFD {
+		logrus.Debugf("exec with CLONE_INTO_CGROUP failed: %v; retrying without", err)
+		// SysProcAttr.CgroupFD is never used when UseCgroupFD is unset.
+		p.cmd.SysProcAttr.UseCgroupFD = false
+		err = p.startWithCPUAffinity()
+	}
+
+	return err
 }
 
 func (p *setnsProcess) start() (retErr error) {
 	defer p.comm.closeParent()
 
-	if p.process.IOPriority != nil {
-		if err := setIOPriority(p.process.IOPriority); err != nil {
-			return err
-		}
-	}
-
-	// get the "before" value of oom kill count
+	// Get the "before" value of oom kill count.
 	oom, _ := p.manager.OOMKillCount()
-	err := p.cmd.Start()
-	// close the child-side of the pipes (controlled by child)
-	p.comm.closeChild()
-	if err != nil {
+
+	if err := p.startWithCgroupFD(); err != nil {
 		return fmt.Errorf("error starting setns process: %w", err)
 	}
 
@@ -161,28 +409,12 @@ func (p *setnsProcess) start() (retErr error) {
 	if err := p.execSetns(); err != nil {
 		return fmt.Errorf("error executing setns process: %w", err)
 	}
-	for _, path := range p.cgroupPaths {
-		if err := cgroups.WriteCgroupProc(path, p.pid()); err != nil && !p.rootlessCgroups {
-			// On cgroup v2 + nesting + domain controllers, WriteCgroupProc may fail with EBUSY.
-			// https://github.com/opencontainers/runc/issues/2356#issuecomment-621277643
-			// Try to join the cgroup of InitProcessPid.
-			if cgroups.IsCgroup2UnifiedMode() && p.initProcessPid != 0 {
-				initProcCgroupFile := fmt.Sprintf("/proc/%d/cgroup", p.initProcessPid)
-				initCg, initCgErr := cgroups.ParseCgroupFile(initProcCgroupFile)
-				if initCgErr == nil {
-					if initCgPath, ok := initCg[""]; ok {
-						initCgDirpath := filepath.Join(fs2.UnifiedMountpoint, initCgPath)
-						logrus.Debugf("adding pid %d to cgroups %v failed (%v), attempting to join %q (obtained from %s)",
-							p.pid(), p.cgroupPaths, err, initCg, initCgDirpath)
-						// NOTE: initCgDirPath is not guaranteed to exist because we didn't pause the container.
-						err = cgroups.WriteCgroupProc(initCgDirpath, p.pid())
-					}
-				}
-			}
-			if err != nil {
-				return fmt.Errorf("error adding pid %d to cgroups: %w", p.pid(), err)
-			}
-		}
+	if err := p.addIntoCgroup(); err != nil {
+		return err
+	}
+	// Set final CPU affinity right after the process is moved into container's cgroup.
+	if err := p.setFinalCPUAffinity(); err != nil {
+		return err
 	}
 	if p.intelRdtPath != "" {
 		// if Intel RDT "resource control" filesystem path exists
@@ -318,60 +550,9 @@ func (p *setnsProcess) execSetns() error {
 	return nil
 }
 
-// terminate sends a SIGKILL to the forked process for the setns routine then waits to
-// avoid the process becoming a zombie.
-func (p *setnsProcess) terminate() error {
-	if p.cmd.Process == nil {
-		return nil
-	}
-	err := p.cmd.Process.Kill()
-	if _, werr := p.wait(); err == nil {
-		err = werr
-	}
-	return err
-}
-
-func (p *setnsProcess) wait() (*os.ProcessState, error) {
-	err := p.cmd.Wait()
-
-	// Return actual ProcessState even on Wait error
-	return p.cmd.ProcessState, err
-}
-
-func (p *setnsProcess) pid() int {
-	return p.cmd.Process.Pid
-}
-
-func (p *setnsProcess) externalDescriptors() []string {
-	return p.fds
-}
-
-func (p *setnsProcess) setExternalDescriptors(newFds []string) {
-	p.fds = newFds
-}
-
-func (p *setnsProcess) forwardChildLogs() chan error {
-	return logs.ForwardLogs(p.comm.logPipeParent)
-}
-
 type initProcess struct {
-	cmd             *exec.Cmd
-	comm            *processComm
-	config          *initConfig
-	manager         cgroups.Manager
+	containerProcess
 	intelRdtManager *intelrdt.Manager
-	container       *Container
-	fds             []string
-	process         *Process
-	bootstrapData   io.Reader
-}
-
-func (p *initProcess) pid() int {
-	return p.cmd.Process.Pid
-}
-
-func (p *initProcess) externalDescriptors() []string {
-	return p.fds
 }
 
 // getChildPid receives the final child's pid over the provided pipe.
@@ -527,6 +708,20 @@ func (p *initProcess) start() (retErr error) {
 		return fmt.Errorf("unable to start init: %w", err)
 	}
 
+	// If the runc-create process is terminated due to receiving SIGKILL signal,
+	// it may lead to the runc-init process leaking due
+	// to issues like cgroup freezing,
+	// and it cannot be cleaned up by runc delete/stop
+	// because the container lacks a state.json file.
+	// This typically occurs when higher-level
+	// container runtimes terminate the runc create process due to context cancellation or timeout.
+	// If the runc-create process terminates due to SIGKILL before
+	// reaching this line of code, we won't encounter the cgroup freezing issue.
+	_, err = p.container.updateState(nil)
+	if err != nil {
+		return fmt.Errorf("unable to store init state before creating cgroup: %w", err)
+	}
+
 	defer func() {
 		if retErr != nil {
 			// Find out if init is killed by the kernel's OOM killer.
@@ -578,6 +773,9 @@ func (p *initProcess) start() (retErr error) {
 			return fmt.Errorf("unable to apply cgroup configuration: %w", err)
 		}
 	}
+	// Reset the CPU affinity after cgroups are configured to make sure it
+	// matches any configured cpuset.
+	tryResetCPUAffinity(p.pid())
 	if p.intelRdtManager != nil {
 		if err := p.intelRdtManager.Apply(p.pid()); err != nil {
 			return fmt.Errorf("unable to apply Intel RDT configuration: %w", err)
@@ -625,9 +823,20 @@ func (p *initProcess) start() (retErr error) {
 	if err := p.createNetworkInterfaces(); err != nil {
 		return fmt.Errorf("error creating network interfaces: %w", err)
 	}
-	if err := p.updateSpecState(); err != nil {
-		return fmt.Errorf("error updating spec state: %w", err)
+
+	if err := p.setupNetworkDevices(); err != nil {
+		return fmt.Errorf("error creating network interfaces: %w", err)
 	}
+
+	// initConfig.SpecState is only needed to run hooks that are executed
+	// inside a container, i.e. CreateContainer and StartContainer.
+	if p.config.Config.HasHook(configs.CreateContainer, configs.StartContainer) {
+		p.config.SpecState, err = p.container.currentOCIState()
+		if err != nil {
+			return fmt.Errorf("error getting current state: %w", err)
+		}
+	}
+
 	if err := utils.WriteJSON(p.comm.initSockParent, p.config); err != nil {
 		return fmt.Errorf("error sending config to init process: %w", err)
 	}
@@ -750,7 +959,7 @@ func (p *initProcess) start() (retErr error) {
 					return fmt.Errorf("error setting Intel RDT config for procHooks process: %w", err)
 				}
 			}
-			if len(p.config.Config.Hooks) != 0 {
+			if p.config.Config.HasHook(configs.Prestart, configs.CreateRuntime) {
 				s, err := p.container.currentOCIState()
 				if err != nil {
 					return err
@@ -789,37 +998,6 @@ func (p *initProcess) start() (retErr error) {
 	return nil
 }
 
-func (p *initProcess) wait() (*os.ProcessState, error) {
-	err := p.cmd.Wait()
-	return p.cmd.ProcessState, err
-}
-
-func (p *initProcess) terminate() error {
-	if p.cmd.Process == nil {
-		return nil
-	}
-	err := p.cmd.Process.Kill()
-	if _, werr := p.wait(); err == nil {
-		err = werr
-	}
-	return err
-}
-
-func (p *initProcess) startTime() (uint64, error) {
-	stat, err := system.Stat(p.pid())
-	return stat.StartTime, err
-}
-
-func (p *initProcess) updateSpecState() error {
-	s, err := p.container.currentOCIState()
-	if err != nil {
-		return err
-	}
-
-	p.config.SpecState = s
-	return nil
-}
-
 func (p *initProcess) createNetworkInterfaces() error {
 	for _, config := range p.config.Config.Networks {
 		strategy, err := getStrategy(config.Type)
@@ -837,20 +1015,28 @@ func (p *initProcess) createNetworkInterfaces() error {
 	return nil
 }
 
-func (p *initProcess) signal(sig os.Signal) error {
-	s, ok := sig.(unix.Signal)
-	if !ok {
-		return errors.New("os: unsupported signal type")
+// setupNetworkDevices sets up and initializes any defined network interface inside the container.
+func (p *initProcess) setupNetworkDevices() error {
+	// host network pods does not move network devices.
+	if !p.config.Config.Namespaces.Contains(configs.NEWNET) {
+		return nil
 	}
-	return unix.Kill(p.pid(), s)
-}
+	// the container init process has already joined the provided net namespace,
+	// so we can use the process's net ns path directly.
+	nsPath := fmt.Sprintf("/proc/%d/ns/net", p.pid())
 
-func (p *initProcess) setExternalDescriptors(newFds []string) {
-	p.fds = newFds
-}
+	// If moving any of the network devices fails, we return an error immediately.
+	// The runtime spec requires that the kernel handles moving back any devices
+	// that were successfully moved before the failure occurred.
+	// See: https://github.com/opencontainers/runtime-spec/blob/27cb0027fd92ef81eda1ea3a8153b8337f56d94a/config-linux.md#namespace-lifecycle-and-container-termination
+	for name, netDevice := range p.config.Config.NetDevices {
+		err := devChangeNetNamespace(name, nsPath, *netDevice)
+		if err != nil {
+			return fmt.Errorf("move netDevice %s to namespace %s: %w", name, nsPath, err)
+		}
+	}
 
-func (p *initProcess) forwardChildLogs() chan error {
-	return logs.ForwardLogs(p.comm.logPipeParent)
+	return nil
 }
 
 func pidGetFd(pid, srcFd int) (*os.File, error) {
@@ -871,6 +1057,7 @@ func sendContainerProcessState(listenerPath string, state *specs.ContainerProces
 	if err != nil {
 		return fmt.Errorf("failed to connect with seccomp agent specified in the seccomp profile: %w", err)
 	}
+	defer conn.Close()
 
 	socket, err := conn.(*net.UnixConn).File()
 	if err != nil {
@@ -894,7 +1081,7 @@ func getPipeFds(pid int) ([]string, error) {
 	fds := make([]string, 3)
 
 	dirPath := filepath.Join("/proc", strconv.Itoa(pid), "/fd")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		// XXX: This breaks if the path is not a valid symlink (which can
 		//      happen in certain particularly unlucky mount namespace setups).
 		f := filepath.Join(dirPath, strconv.Itoa(i))
@@ -954,22 +1141,4 @@ func (p *Process) InitializeIO(rootuid, rootgid int) (i *IO, err error) {
 		}
 	}
 	return i, nil
-}
-
-func setIOPriority(ioprio *configs.IOPriority) error {
-	const ioprioWhoPgrp = 1
-
-	class, ok := configs.IOPrioClassMapping[ioprio.Class]
-	if !ok {
-		return fmt.Errorf("invalid io priority class: %s", ioprio.Class)
-	}
-
-	// Combine class and priority into a single value
-	// https://github.com/torvalds/linux/blob/v5.18/include/uapi/linux/ioprio.h#L5-L17
-	iop := (class << 13) | ioprio.Priority
-	_, _, errno := unix.RawSyscall(unix.SYS_IOPRIO_SET, ioprioWhoPgrp, 0, uintptr(iop))
-	if errno != 0 {
-		return fmt.Errorf("failed to set io priority: %w", errno)
-	}
-	return nil
 }

@@ -1,3 +1,5 @@
+//go:build !runc_nocriu
+
 package libcontainer
 
 import (
@@ -14,14 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/checkpoint-restore/go-criu/v6"
-	criurpc "github.com/checkpoint-restore/go-criu/v6/rpc"
+	"github.com/checkpoint-restore/go-criu/v7"
+	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/opencontainers/runc/libcontainer/cgroups"
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/runc/internal/pathrs"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/utils"
 )
@@ -186,7 +189,7 @@ func criuNsToKey(t configs.NamespaceType) string {
 
 func (c *Container) handleCheckpointingExternalNamespaces(rpcOpts *criurpc.CriuOpts, t configs.NamespaceType) error {
 	if !c.criuSupportsExtNS(t) {
-		return nil
+		return fmt.Errorf("criu lacks support for external %s namespace during checkpointing process (old criu version?)", configs.NsName(t))
 	}
 
 	nsPath := c.config.Namespaces.PathOf(t)
@@ -246,7 +249,7 @@ func (c *Container) handleRestoringNamespaces(rpcOpts *criurpc.CriuOpts, extraFi
 
 func (c *Container) handleRestoringExternalNamespaces(rpcOpts *criurpc.CriuOpts, extraFiles *[]*os.File, t configs.NamespaceType) error {
 	if !c.criuSupportsExtNS(t) {
-		return nil
+		return fmt.Errorf("criu lacks support for external %s namespace during the restoration process (old criu version?)", configs.NsName(t))
 	}
 
 	nsPath := c.config.Namespaces.PathOf(t)
@@ -295,6 +298,11 @@ func (c *Container) Checkpoint(criuOpts *CriuOpts) error {
 		return errors.New("invalid directory to save checkpoint")
 	}
 
+	cgMode, err := criuCgMode(criuOpts.ManageCgroupsMode)
+	if err != nil {
+		return err
+	}
+
 	// Since a container can be C/R'ed multiple times,
 	// the checkpoint directory may already exist.
 	if err := os.Mkdir(criuOpts.ImagesDirectory, 0o700); err != nil && !os.IsExist(err) {
@@ -309,22 +317,25 @@ func (c *Container) Checkpoint(criuOpts *CriuOpts) error {
 	defer imageDir.Close()
 
 	rpcOpts := criurpc.CriuOpts{
-		ImagesDirFd:     proto.Int32(int32(imageDir.Fd())),
-		LogLevel:        proto.Int32(4),
-		LogFile:         proto.String(logFile),
-		Root:            proto.String(c.config.Rootfs),
-		ManageCgroups:   proto.Bool(true),
-		NotifyScripts:   proto.Bool(true),
-		Pid:             proto.Int32(int32(c.initProcess.pid())),
-		ShellJob:        proto.Bool(criuOpts.ShellJob),
-		LeaveRunning:    proto.Bool(criuOpts.LeaveRunning),
-		TcpEstablished:  proto.Bool(criuOpts.TcpEstablished),
-		ExtUnixSk:       proto.Bool(criuOpts.ExternalUnixConnections),
-		FileLocks:       proto.Bool(criuOpts.FileLocks),
-		EmptyNs:         proto.Uint32(criuOpts.EmptyNs),
-		OrphanPtsMaster: proto.Bool(true),
-		AutoDedup:       proto.Bool(criuOpts.AutoDedup),
-		LazyPages:       proto.Bool(criuOpts.LazyPages),
+		ImagesDirFd:       proto.Int32(int32(imageDir.Fd())),
+		LogLevel:          proto.Int32(4),
+		LogFile:           proto.String(logFile),
+		Root:              proto.String(c.config.Rootfs),
+		ManageCgroups:     proto.Bool(true), // Obsoleted by ManageCgroupsMode.
+		ManageCgroupsMode: &cgMode,
+		NotifyScripts:     proto.Bool(true),
+		Pid:               proto.Int32(int32(c.initProcess.pid())),
+		ShellJob:          proto.Bool(criuOpts.ShellJob),
+		LeaveRunning:      proto.Bool(criuOpts.LeaveRunning),
+		TcpEstablished:    proto.Bool(criuOpts.TcpEstablished),
+		TcpSkipInFlight:   proto.Bool(criuOpts.TcpSkipInFlight),
+		LinkRemap:         proto.Bool(criuOpts.LinkRemap),
+		ExtUnixSk:         proto.Bool(criuOpts.ExternalUnixConnections),
+		FileLocks:         proto.Bool(criuOpts.FileLocks),
+		EmptyNs:           proto.Uint32(criuOpts.EmptyNs),
+		OrphanPtsMaster:   proto.Bool(true),
+		AutoDedup:         proto.Bool(criuOpts.AutoDedup),
+		LazyPages:         proto.Bool(criuOpts.LazyPages),
 	}
 
 	// if criuOpts.WorkDirectory is not set, criu default is used.
@@ -379,12 +390,6 @@ func (c *Container) Checkpoint(criuOpts *CriuOpts) error {
 	if criuOpts.ParentImage != "" {
 		rpcOpts.ParentImg = proto.String(criuOpts.ParentImage)
 		rpcOpts.TrackMem = proto.Bool(true)
-	}
-
-	// append optional manage cgroups mode
-	if criuOpts.ManageCgroupsMode != 0 {
-		mode := criuOpts.ManageCgroupsMode
-		rpcOpts.ManageCgroupsMode = &mode
 	}
 
 	var t criurpc.CriuReqType
@@ -519,34 +524,9 @@ func (c *Container) restoreNetwork(req *criurpc.CriuReq, criuOpts *CriuOpts) {
 	}
 }
 
-// makeCriuRestoreMountpoints makes the actual mountpoints for the
-// restore using CRIU. This function is inspired from the code in
-// rootfs_linux.go.
-func (c *Container) makeCriuRestoreMountpoints(m *configs.Mount) error {
-	if m.Device == "cgroup" {
-		// No mount point(s) need to be created:
-		//
-		// * for v1, mount points are saved by CRIU because
-		//   /sys/fs/cgroup is a tmpfs mount
-		//
-		// * for v2, /sys/fs/cgroup is a real mount, but
-		//   the mountpoint appears as soon as /sys is mounted
-		return nil
-	}
-	// TODO: pass srcFD? Not sure if criu is impacted by issue #2484.
-	me := mountEntry{Mount: m}
-	// For all other filesystems, just make the target.
-	if _, err := createMountpoint(c.config.Rootfs, me); err != nil {
-		return fmt.Errorf("create criu restore mountpoint for %s mount: %w", me.Destination, err)
-	}
-	return nil
-}
-
-// isPathInPrefixList is a small function for CRIU restore to make sure
-// mountpoints, which are on a tmpfs, are not created in the roofs.
-func isPathInPrefixList(path string, prefix []string) bool {
-	for _, p := range prefix {
-		if strings.HasPrefix(path, p+"/") {
+func isOnTmpfs(path string, mounts []*configs.Mount) bool {
+	for _, m := range mounts {
+		if m.Device == "tmpfs" && strings.HasPrefix(path, m.Destination+"/") {
 			return true
 		}
 	}
@@ -560,54 +540,72 @@ func isPathInPrefixList(path string, prefix []string) bool {
 // This function also creates missing mountpoints as long as they
 // are not on top of a tmpfs, as CRIU will restore tmpfs content anyway.
 func (c *Container) prepareCriuRestoreMounts(mounts []*configs.Mount) error {
-	// First get a list of a all tmpfs mounts
-	tmpfs := []string{}
-	for _, m := range mounts {
-		switch m.Device {
-		case "tmpfs":
-			tmpfs = append(tmpfs, m.Destination)
-		}
-	}
-	// Now go through all mounts and create the mountpoints
-	// if the mountpoints are not on a tmpfs, as CRIU will
-	// restore the complete tmpfs content from its checkpoint.
 	umounts := []string{}
 	defer func() {
 		for _, u := range umounts {
-			_ = utils.WithProcfd(c.config.Rootfs, u, func(procfd string) error {
-				if e := unix.Unmount(procfd, unix.MNT_DETACH); e != nil {
-					if e != unix.EINVAL {
+			mntFile, err := pathrs.OpenInRoot(c.config.Rootfs, u, unix.O_PATH)
+			if err != nil {
+				logrus.Warnf("Error during cleanup unmounting %s: open handle: %v", u, err)
+				continue
+			}
+			_ = utils.WithProcfdFile(mntFile, func(procfd string) error {
+				if err := unix.Unmount(procfd, unix.MNT_DETACH); err != nil {
+					if err != unix.EINVAL {
 						// Ignore EINVAL as it means 'target is not a mount point.'
 						// It probably has already been unmounted.
-						logrus.Warnf("Error during cleanup unmounting of %s (%s): %v", procfd, u, e)
+						logrus.Warnf("Error during cleanup unmounting of %s (%s): %v", procfd, u, err)
 					}
 				}
 				return nil
 			})
+			_ = mntFile.Close()
 		}
 	}()
+	// Now go through all mounts and create the required mountpoints.
 	for _, m := range mounts {
-		if !isPathInPrefixList(m.Destination, tmpfs) {
-			if err := c.makeCriuRestoreMountpoints(m); err != nil {
+		// No cgroup mount point(s) need to be created:
+		// * for v1, mount points are saved by CRIU because
+		//   /sys/fs/cgroup is a tmpfs mount;
+		// * for v2, /sys/fs/cgroup is a real mount, but
+		//   the mountpoint appears as soon as /sys is mounted.
+		if m.Device == "cgroup" {
+			continue
+		}
+		// If the mountpoint is on a tmpfs, skip it as CRIU will
+		// restore the complete tmpfs content from its checkpoint.
+		if isOnTmpfs(m.Destination, mounts) {
+			continue
+		}
+		me := mountEntry{Mount: m}
+		if err := me.createOpenMountpoint(c.config.Rootfs); err != nil {
+			return fmt.Errorf("create criu restore mountpoint for %s mount: %w", me.Destination, err)
+		}
+		if me.dstFile != nil {
+			defer me.dstFile.Close()
+		}
+		// If the mount point is a bind mount, we need to mount
+		// it now so that runc can create the necessary mount
+		// points for mounts in bind mounts.
+		// This also happens during initial container creation.
+		// Without this CRIU restore will fail
+		// See: https://github.com/opencontainers/runc/issues/2748
+		// It is also not necessary to order the mount points
+		// because during initial container creation mounts are
+		// set up in the order they are configured.
+		if m.Device == "bind" {
+			if err := utils.WithProcfdFile(me.dstFile, func(dstFd string) error {
+				return mountViaFds(m.Source, nil, m.Destination, dstFd, "", unix.MS_BIND|unix.MS_REC, "")
+			}); err != nil {
 				return err
 			}
-			// If the mount point is a bind mount, we need to mount
-			// it now so that runc can create the necessary mount
-			// points for mounts in bind mounts.
-			// This also happens during initial container creation.
-			// Without this CRIU restore will fail
-			// See: https://github.com/opencontainers/runc/issues/2748
-			// It is also not necessary to order the mount points
-			// because during initial container creation mounts are
-			// set up in the order they are configured.
-			if m.Device == "bind" {
-				if err := utils.WithProcfd(c.config.Rootfs, m.Destination, func(dstFd string) error {
-					return mountViaFds(m.Source, nil, m.Destination, dstFd, "", unix.MS_BIND|unix.MS_REC, "")
-				}); err != nil {
-					return err
-				}
-				umounts = append(umounts, m.Destination)
-			}
+			umounts = append(umounts, m.Destination)
+		}
+		if me.dstFile != nil {
+			// As this is being done in a loop, the defer earlier will be
+			// delayed until all mountpoints are handled -- for a config with
+			// many mountpoints this could result in a lot of open files. So we
+			// opportunistically close the file as well as deferring it.
+			_ = me.dstFile.Close()
 		}
 	}
 	return nil
@@ -634,6 +632,12 @@ func (c *Container) Restore(process *Process, criuOpts *CriuOpts) error {
 	if criuOpts.ImagesDirectory == "" {
 		return errors.New("invalid directory to restore checkpoint")
 	}
+
+	cgMode, err := criuCgMode(criuOpts.ManageCgroupsMode)
+	if err != nil {
+		return err
+	}
+
 	logDir := criuOpts.ImagesDirectory
 	imageDir, err := os.Open(criuOpts.ImagesDirectory)
 	if err != nil {
@@ -663,22 +667,23 @@ func (c *Container) Restore(process *Process, criuOpts *CriuOpts) error {
 	req := &criurpc.CriuReq{
 		Type: &t,
 		Opts: &criurpc.CriuOpts{
-			ImagesDirFd:     proto.Int32(int32(imageDir.Fd())),
-			EvasiveDevices:  proto.Bool(true),
-			LogLevel:        proto.Int32(4),
-			LogFile:         proto.String(logFile),
-			RstSibling:      proto.Bool(true),
-			Root:            proto.String(root),
-			ManageCgroups:   proto.Bool(true),
-			NotifyScripts:   proto.Bool(true),
-			ShellJob:        proto.Bool(criuOpts.ShellJob),
-			ExtUnixSk:       proto.Bool(criuOpts.ExternalUnixConnections),
-			TcpEstablished:  proto.Bool(criuOpts.TcpEstablished),
-			FileLocks:       proto.Bool(criuOpts.FileLocks),
-			EmptyNs:         proto.Uint32(criuOpts.EmptyNs),
-			OrphanPtsMaster: proto.Bool(true),
-			AutoDedup:       proto.Bool(criuOpts.AutoDedup),
-			LazyPages:       proto.Bool(criuOpts.LazyPages),
+			ImagesDirFd:       proto.Int32(int32(imageDir.Fd())),
+			EvasiveDevices:    proto.Bool(true),
+			LogLevel:          proto.Int32(4),
+			LogFile:           proto.String(logFile),
+			RstSibling:        proto.Bool(true),
+			Root:              proto.String(root),
+			ManageCgroups:     proto.Bool(true), // Obsoleted by ManageCgroupsMode.
+			ManageCgroupsMode: &cgMode,
+			NotifyScripts:     proto.Bool(true),
+			ShellJob:          proto.Bool(criuOpts.ShellJob),
+			ExtUnixSk:         proto.Bool(criuOpts.ExternalUnixConnections),
+			TcpEstablished:    proto.Bool(criuOpts.TcpEstablished),
+			FileLocks:         proto.Bool(criuOpts.FileLocks),
+			EmptyNs:           proto.Uint32(criuOpts.EmptyNs),
+			OrphanPtsMaster:   proto.Bool(true),
+			AutoDedup:         proto.Bool(criuOpts.AutoDedup),
+			LazyPages:         proto.Bool(criuOpts.LazyPages),
 		},
 	}
 
@@ -757,12 +762,6 @@ func (c *Container) Restore(process *Process, criuOpts *CriuOpts) error {
 		c.restoreNetwork(req, criuOpts)
 	}
 
-	// append optional manage cgroups mode
-	if criuOpts.ManageCgroupsMode != 0 {
-		mode := criuOpts.ManageCgroupsMode
-		req.Opts.ManageCgroupsMode = &mode
-	}
-
 	var (
 		fds    []string
 		fdJSON []byte
@@ -827,7 +826,7 @@ func logCriuErrors(dir, file string) {
 			logrus.Warn("...")
 		}
 		// Print the last lines.
-		for add := 0; add < max; add++ {
+		for add := range max {
 			i := (idx + add) % max
 			s := lines[i]
 			actLineNo := lineNo + add - max + 1
@@ -951,12 +950,12 @@ func (c *Container) criuSwrk(process *Process, req *criurpc.CriuReq, opts *CriuO
 	// available but empty. criurpc.CriuReqType_VERSION actually
 	// has no req.GetOpts().
 	if logrus.GetLevel() >= logrus.DebugLevel &&
-		!(req.GetType() == criurpc.CriuReqType_FEATURE_CHECK ||
-			req.GetType() == criurpc.CriuReqType_VERSION) {
+		(req.GetType() != criurpc.CriuReqType_FEATURE_CHECK &&
+			req.GetType() != criurpc.CriuReqType_VERSION) {
 
 		val := reflect.ValueOf(req.GetOpts())
 		v := reflect.Indirect(val)
-		for i := 0; i < v.NumField(); i++ {
+		for i := range v.NumField() {
 			st := v.Type()
 			name := st.Field(i).Name
 			if 'A' <= name[0] && name[0] <= 'Z' {
@@ -1096,7 +1095,7 @@ func (c *Container) criuNotifications(resp *criurpc.CriuResp, process *Process, 
 	logrus.Debugf("notify: %s\n", script)
 	switch script {
 	case "post-dump":
-		f, err := os.Create(filepath.Join(c.stateDir, "checkpoint"))
+		f, err := os.Create(filepath.Join(c.stateDir, "checkpoint")) //nolint:forbidigo // this is a host-side operation in a runc-controlled directory
 		if err != nil {
 			return err
 		}
@@ -1110,7 +1109,7 @@ func (c *Container) criuNotifications(resp *criurpc.CriuResp, process *Process, 
 			return err
 		}
 	case "setup-namespaces":
-		if c.config.Hooks != nil {
+		if c.config.HasHook(configs.Prestart, configs.CreateRuntime) {
 			s, err := c.currentOCIState()
 			if err != nil {
 				return nil
@@ -1146,6 +1145,13 @@ func (c *Container) criuNotifications(resp *criurpc.CriuResp, process *Process, 
 		}
 		// create a timestamp indicating when the restored checkpoint was started
 		c.created = time.Now().UTC()
+		if !c.config.Namespaces.Contains(configs.NEWTIME) &&
+			configs.IsNamespaceSupported(configs.NEWTIME) &&
+			c.checkCriuVersion(31400) == nil {
+			// CRIU restores processes into a time namespace.
+			c.config.Namespaces = append(c.config.Namespaces,
+				configs.Namespace{Type: configs.NEWTIME})
+		}
 		if _, err := c.updateState(r); err != nil {
 			return err
 		}
@@ -1183,4 +1189,21 @@ func (c *Container) criuNotifications(resp *criurpc.CriuResp, process *Process, 
 		}
 	}
 	return nil
+}
+
+func criuCgMode(mode string) (criurpc.CriuCgMode, error) {
+	switch mode {
+	case "":
+		return criurpc.CriuCgMode_DEFAULT, nil
+	case "soft":
+		return criurpc.CriuCgMode_SOFT, nil
+	case "full":
+		return criurpc.CriuCgMode_FULL, nil
+	case "strict":
+		return criurpc.CriuCgMode_STRICT, nil
+	case "ignore":
+		return criurpc.CriuCgMode_IGNORE, nil
+	default:
+		return 0, errors.New("invalid manage-cgroups-mode value")
+	}
 }

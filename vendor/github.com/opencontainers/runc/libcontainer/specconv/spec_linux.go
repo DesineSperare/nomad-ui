@@ -5,8 +5,10 @@ package specconv
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,16 +16,17 @@ import (
 
 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
 	dbus "github.com/godbus/dbus/v5"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/devices"
-	"github.com/opencontainers/runc/libcontainer/internal/userns"
-	"github.com/opencontainers/runc/libcontainer/seccomp"
-	libcontainerUtils "github.com/opencontainers/runc/libcontainer/utils"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
-
 	"golang.org/x/sys/unix"
+
+	"github.com/opencontainers/cgroups"
+	devices "github.com/opencontainers/cgroups/devices/config"
+	"github.com/opencontainers/runc/internal/linux"
+	"github.com/opencontainers/runc/internal/pathrs"
+	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/libcontainer/internal/userns"
+	"github.com/opencontainers/runc/libcontainer/seccomp"
 )
 
 var (
@@ -39,6 +42,8 @@ var (
 		flag  int
 	}
 	complexFlags map[string]func(*configs.Mount)
+	mpolModeMap  map[string]uint
+	mpolModeFMap map[string]uint
 )
 
 func initMaps() {
@@ -146,6 +151,22 @@ func initMaps() {
 				m.IDMapping.Recursive = true
 			},
 		}
+
+		mpolModeMap = map[string]uint{
+			string(specs.MpolDefault):            configs.MPOL_DEFAULT,
+			string(specs.MpolPreferred):          configs.MPOL_PREFERRED,
+			string(specs.MpolBind):               configs.MPOL_BIND,
+			string(specs.MpolInterleave):         configs.MPOL_INTERLEAVE,
+			string(specs.MpolLocal):              configs.MPOL_LOCAL,
+			string(specs.MpolPreferredMany):      configs.MPOL_PREFERRED_MANY,
+			string(specs.MpolWeightedInterleave): configs.MPOL_WEIGHTED_INTERLEAVE,
+		}
+
+		mpolModeFMap = map[string]uint{
+			string(specs.MpolFStaticNodes):   configs.MPOL_F_STATIC_NODES,
+			string(specs.MpolFRelativeNodes): configs.MPOL_F_RELATIVE_NODES,
+			string(specs.MpolFNumaBalancing): configs.MPOL_F_NUMA_BALANCING,
+		}
 	})
 }
 
@@ -180,6 +201,20 @@ func KnownMountOptions() []string {
 	}
 	sort.Strings(res)
 	return res
+}
+
+// KnownMemoryPolicyModes returns the list of the known memory policy modes.
+// Used by `runc features`.
+func KnownMemoryPolicyModes() []string {
+	initMaps()
+	return slices.Sorted(maps.Keys(mpolModeMap))
+}
+
+// KnownMemoryPolicyFlags returns the list of the known memory policy mode flags.
+// Used by `runc features`.
+func KnownMemoryPolicyFlags() []string {
+	initMaps()
+	return slices.Sorted(maps.Keys(mpolModeFMap))
 }
 
 // AllowedDevices is the set of devices which are automatically included for
@@ -344,24 +379,13 @@ type CreateOpts struct {
 	RootlessCgroups  bool
 }
 
-// getwd is a wrapper similar to os.Getwd, except it always gets
-// the value from the kernel, which guarantees the returned value
-// to be absolute and clean.
-func getwd() (wd string, err error) {
-	for {
-		wd, err = unix.Getwd()
-		if err != unix.EINTR {
-			break
-		}
-	}
-	return wd, os.NewSyscallError("getwd", err)
-}
-
 // CreateLibcontainerConfig creates a new libcontainer configuration from a
 // given specification and a cgroup name
 func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
-	// runc's cwd will always be the bundle path
-	cwd, err := getwd()
+	// Runc's cwd will always be the bundle path.
+	// Use the value from the kernel, which guarantees the returned value
+	// to be absolute and clean.
+	cwd, err := linux.Getwd()
 	if err != nil {
 		return nil, err
 	}
@@ -471,10 +495,34 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 		}
 		if spec.Linux.IntelRdt != nil {
 			config.IntelRdt = &configs.IntelRdt{
-				ClosID:        spec.Linux.IntelRdt.ClosID,
-				L3CacheSchema: spec.Linux.IntelRdt.L3CacheSchema,
-				MemBwSchema:   spec.Linux.IntelRdt.MemBwSchema,
+				ClosID:           spec.Linux.IntelRdt.ClosID,
+				Schemata:         spec.Linux.IntelRdt.Schemata,
+				L3CacheSchema:    spec.Linux.IntelRdt.L3CacheSchema,
+				MemBwSchema:      spec.Linux.IntelRdt.MemBwSchema,
+				EnableMonitoring: spec.Linux.IntelRdt.EnableMonitoring,
 			}
+		}
+		if spec.Linux.MemoryPolicy != nil {
+			var ok bool
+			var err error
+			specMp := spec.Linux.MemoryPolicy
+			confMp := &configs.LinuxMemoryPolicy{}
+			confMp.Mode, ok = mpolModeMap[string(specMp.Mode)]
+			if !ok {
+				return nil, fmt.Errorf("invalid memory policy mode %q", specMp.Mode)
+			}
+			confMp.Nodes, err = configs.ToCPUSet(specMp.Nodes)
+			if err != nil {
+				return nil, fmt.Errorf("invalid memory policy nodes %q: %w", specMp.Nodes, err)
+			}
+			for _, specFlag := range specMp.Flags {
+				confFlag, ok := mpolModeFMap[string(specFlag)]
+				if !ok {
+					return nil, fmt.Errorf("invalid memory policy flag %q", specFlag)
+				}
+				confMp.Flags |= confFlag
+			}
+			config.MemoryPolicy = confMp
 		}
 		if spec.Linux.Personality != nil {
 			if len(spec.Linux.Personality.Flags) > 0 {
@@ -489,6 +537,14 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 			}
 		}
 
+		for name, netdev := range spec.Linux.NetDevices {
+			if config.NetDevices == nil {
+				config.NetDevices = make(map[string]*configs.LinuxNetDevice)
+			}
+			config.NetDevices[name] = &configs.LinuxNetDevice{
+				Name: netdev.Name,
+			}
+		}
 	}
 
 	// Set the host UID that should own the container's cgroup.
@@ -556,6 +612,11 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 			ioPriority := *spec.Process.IOPriority
 			config.IOPriority = &ioPriority
 		}
+		config.ExecCPUAffinity, err = configs.ConvertCPUAffinity(spec.Process.ExecCPUAffinity)
+		if err != nil {
+			return nil, err
+		}
+
 	}
 	createHooks(spec, config)
 	config.Version = specs.Version
@@ -630,7 +691,7 @@ func checkPropertyName(s string) error {
 	}
 	// Check ASCII characters rather than Unicode runes,
 	// so we have to use indexes rather than range.
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		ch := s[i]
 		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
 			continue
@@ -685,8 +746,8 @@ func initSystemdProps(spec *specs.Spec) ([]systemdDbus.Property, error) {
 	var sp []systemdDbus.Property
 
 	for k, v := range spec.Annotations {
-		name := strings.TrimPrefix(k, keyPrefix)
-		if len(name) == len(k) { // prefix not there
+		name, ok := strings.CutPrefix(k, keyPrefix)
+		if !ok { // prefix not there
 			continue
 		}
 		if err := checkPropertyName(name); err != nil {
@@ -714,7 +775,7 @@ func initSystemdProps(spec *specs.Spec) ([]systemdDbus.Property, error) {
 	return sp, nil
 }
 
-func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*configs.Cgroup, error) {
+func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*cgroups.Cgroup, error) {
 	var (
 		myCgroupPath string
 
@@ -723,10 +784,10 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 		name             = opts.CgroupName
 	)
 
-	c := &configs.Cgroup{
+	c := &cgroups.Cgroup{
 		Systemd:   useSystemdCgroup,
 		Rootless:  opts.RootlessCgroups,
-		Resources: &configs.Resources{},
+		Resources: &cgroups.Resources{},
 	}
 
 	if useSystemdCgroup {
@@ -741,7 +802,7 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 		if useSystemdCgroup {
 			myCgroupPath = spec.Linux.CgroupsPath
 		} else {
-			myCgroupPath = libcontainerUtils.CleanPath(spec.Linux.CgroupsPath)
+			myCgroupPath = pathrs.LexicallyCleanPath(spec.Linux.CgroupsPath)
 		}
 	}
 
@@ -870,40 +931,40 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 					if wd.LeafWeight != nil {
 						leafWeight = *wd.LeafWeight
 					}
-					weightDevice := configs.NewWeightDevice(wd.Major, wd.Minor, weight, leafWeight)
+					weightDevice := cgroups.NewWeightDevice(wd.Major, wd.Minor, weight, leafWeight)
 					c.Resources.BlkioWeightDevice = append(c.Resources.BlkioWeightDevice, weightDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleReadBpsDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleReadBpsDevice = append(c.Resources.BlkioThrottleReadBpsDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleWriteBpsDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleWriteBpsDevice = append(c.Resources.BlkioThrottleWriteBpsDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleReadIOPSDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleReadIOPSDevice = append(c.Resources.BlkioThrottleReadIOPSDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleWriteIOPSDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleWriteIOPSDevice = append(c.Resources.BlkioThrottleWriteIOPSDevice, throttleDevice)
 				}
 			}
 			for _, l := range r.HugepageLimits {
-				c.Resources.HugetlbLimit = append(c.Resources.HugetlbLimit, &configs.HugepageLimit{
+				c.Resources.HugetlbLimit = append(c.Resources.HugetlbLimit, &cgroups.HugepageLimit{
 					Pagesize: l.Pagesize,
 					Limit:    l.Limit,
 				})
 			}
 			if len(r.Rdma) > 0 {
-				c.Resources.Rdma = make(map[string]configs.LinuxRdma, len(r.Rdma))
+				c.Resources.Rdma = make(map[string]cgroups.LinuxRdma, len(r.Rdma))
 				for k, v := range r.Rdma {
-					c.Resources.Rdma[k] = configs.LinuxRdma{
+					c.Resources.Rdma[k] = cgroups.LinuxRdma{
 						HcaHandles: v.HcaHandles,
 						HcaObjects: v.HcaObjects,
 					}
@@ -914,18 +975,14 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 					c.Resources.NetClsClassid = *r.Network.ClassID
 				}
 				for _, m := range r.Network.Priorities {
-					c.Resources.NetPrioIfpriomap = append(c.Resources.NetPrioIfpriomap, &configs.IfPrioMap{
+					c.Resources.NetPrioIfpriomap = append(c.Resources.NetPrioIfpriomap, &cgroups.IfPrioMap{
 						Interface: m.Name,
 						Priority:  int64(m.Priority),
 					})
 				}
 			}
 			if len(r.Unified) > 0 {
-				// copy the map
-				c.Resources.Unified = make(map[string]string, len(r.Unified))
-				for k, v := range r.Unified {
-					c.Resources.Unified[k] = v
-				}
+				c.Resources.Unified = maps.Clone(r.Unified)
 			}
 		}
 	}
@@ -1256,8 +1313,8 @@ func createHooks(rspec *specs.Spec, config *configs.Config) {
 	}
 }
 
-func createCommandHook(h specs.Hook) configs.Command {
-	cmd := configs.Command{
+func createCommandHook(h specs.Hook) *configs.Command {
+	cmd := &configs.Command{
 		Path: h.Path,
 		Args: h.Args,
 		Env:  h.Env,

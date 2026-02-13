@@ -11,6 +11,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
+	"github.com/opencontainers/runc/internal/linux"
+	"github.com/opencontainers/runc/internal/pathrs"
+	"github.com/opencontainers/runc/internal/sys"
 	"github.com/opencontainers/runc/libcontainer/apparmor"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/keys"
@@ -47,22 +50,22 @@ func (l *linuxStandardInit) getSessionRingParams() (string, uint32, uint32) {
 
 func (l *linuxStandardInit) Init() error {
 	if !l.config.Config.NoNewKeyring {
-		if err := selinux.SetKeyLabel(l.config.ProcessLabel); err != nil {
-			return err
+		if l.config.ProcessLabel != "" {
+			if err := selinux.SetKeyLabel(l.config.ProcessLabel); err != nil {
+				return err
+			}
+			defer selinux.SetKeyLabel("") //nolint: errcheck
 		}
-		defer selinux.SetKeyLabel("") //nolint: errcheck
 		ringname, keepperms, newperms := l.getSessionRingParams()
 
 		// Do not inherit the parent's session keyring.
 		if sessKeyId, err := keys.JoinSessionKeyring(ringname); err != nil {
+			logrus.Warnf("KeyctlJoinSessionKeyring: %v", err)
 			// If keyrings aren't supported then it is likely we are on an
 			// older kernel (or inside an LXC container). While we could bail,
 			// the security feature we are using here is best-effort (it only
 			// really provides marginal protection since VFS credentials are
 			// the only significant protection of keyrings).
-			//
-			// TODO(cyphar): Log this so people know what's going on, once we
-			//               have proper logging in 'runc init'.
 			if !errors.Is(err, unix.ENOSYS) {
 				return fmt.Errorf("unable to join session keyring: %w", err)
 			}
@@ -130,20 +133,17 @@ func (l *linuxStandardInit) Init() error {
 		return fmt.Errorf("unable to apply apparmor profile: %w", err)
 	}
 
-	for key, value := range l.config.Config.Sysctl {
-		if err := writeSystemProperty(key, value); err != nil {
-			return err
-		}
+	if err := sys.WriteSysctls(l.config.Config.Sysctl); err != nil {
+		return err
 	}
 	for _, path := range l.config.Config.ReadonlyPaths {
 		if err := readonlyPath(path); err != nil {
 			return fmt.Errorf("can't make %q read-only: %w", path, err)
 		}
 	}
-	for _, path := range l.config.Config.MaskPaths {
-		if err := maskPath(path, l.config.Config.MountLabel); err != nil {
-			return fmt.Errorf("can't mask path %s: %w", path, err)
-		}
+
+	if err := maskPaths(l.config.Config.MaskPaths, l.config.Config.MountLabel); err != nil {
+		return err
 	}
 	pdeath, err := system.GetParentDeathSignal()
 	if err != nil {
@@ -155,15 +155,23 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	if l.config.Config.Scheduler != nil {
-		if err := setupScheduler(l.config.Config); err != nil {
+	if err := setupScheduler(l.config); err != nil {
+		return err
+	}
+
+	if err := setupIOPriority(l.config); err != nil {
+		return err
+	}
+
+	// Set personality if specified.
+	if l.config.Config.Personality != nil {
+		if err := setupPersonality(l.config.Config); err != nil {
 			return err
 		}
 	}
-	if l.config.Config.IOPriority != nil {
-		if err := setIOPriority(l.config.Config.IOPriority); err != nil {
-			return err
-		}
+
+	if err := setupMemoryPolicy(l.config.Config); err != nil {
+		return err
 	}
 
 	// Tell our parent that we're ready to exec. This must be done before the
@@ -172,10 +180,12 @@ func (l *linuxStandardInit) Init() error {
 	if err := syncParentReady(l.pipe); err != nil {
 		return fmt.Errorf("sync ready: %w", err)
 	}
-	if err := selinux.SetExecLabel(l.config.ProcessLabel); err != nil {
-		return fmt.Errorf("can't set process label: %w", err)
+	if l.config.ProcessLabel != "" {
+		if err := selinux.SetExecLabel(l.config.ProcessLabel); err != nil {
+			return fmt.Errorf("can't set process label: %w", err)
+		}
+		defer selinux.SetExecLabel("") //nolint: errcheck
 	}
-	defer selinux.SetExecLabel("") //nolint: errcheck
 	// Without NoNewPrivileges seccomp is a privileged operation, so we need to
 	// do this before dropping capabilities; otherwise do it as late as possible
 	// just before execve so as few syscalls take place after it as possible.
@@ -197,6 +207,17 @@ func (l *linuxStandardInit) Init() error {
 	if err := pdeath.Restore(); err != nil {
 		return fmt.Errorf("can't restore pdeath signal: %w", err)
 	}
+
+	// In case we have any StartContainer hooks to run, and they don't
+	// have environment configured explicitly, make sure they will be run
+	// with the same environment as container's init.
+	//
+	// NOTE the above described behavior is not part of runtime-spec, but
+	// rather a de facto historical thing we afraid to change.
+	if h := l.config.Config.Hooks[configs.StartContainer]; len(h) > 0 {
+		h.SetDefaultEnv(l.config.Env)
+	}
+
 	// Compare the parent from the initial start of the init process and make
 	// sure that it did not change.  if the parent changes that means it died
 	// and we were reparented to something else so we should just kill ourself
@@ -227,13 +248,6 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	// Set personality if specified.
-	if l.config.Config.Personality != nil {
-		if err := setupPersonality(l.config.Config); err != nil {
-			return err
-		}
-	}
-
 	// Close the pipe to signal that we have completed our init.
 	logrus.Debugf("init: closing the pipe to signal completion")
 	_ = l.pipe.Close()
@@ -244,19 +258,17 @@ func (l *linuxStandardInit) Init() error {
 		return fmt.Errorf("close log pipe: %w", err)
 	}
 
-	fifoPath, closer := utils.ProcThreadSelfFd(l.fifoFile.Fd())
-	defer closer()
-
 	// Wait for the FIFO to be opened on the other side before exec-ing the
 	// user process. We open it through /proc/self/fd/$fd, because the fd that
 	// was given to us was an O_PATH fd to the fifo itself. Linux allows us to
 	// re-open an O_PATH fd through /proc.
-	fd, err := unix.Open(fifoPath, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	fifoFile, err := pathrs.Reopen(l.fifoFile, unix.O_WRONLY|unix.O_CLOEXEC)
 	if err != nil {
-		return &os.PathError{Op: "open exec fifo", Path: fifoPath, Err: err}
+		return fmt.Errorf("reopen exec fifo: %w", err)
 	}
-	if _, err := unix.Write(fd, []byte("0")); err != nil {
-		return &os.PathError{Op: "write exec fifo", Path: fifoPath, Err: err}
+	defer fifoFile.Close()
+	if _, err := fifoFile.Write([]byte("0")); err != nil {
+		return &os.PathError{Op: "write exec fifo", Path: fifoFile.Name(), Err: err}
 	}
 
 	// Close the O_PATH fifofd fd before exec because the kernel resets
@@ -265,13 +277,15 @@ func (l *linuxStandardInit) Init() error {
 	// N.B. the core issue itself (passing dirfds to the host filesystem) has
 	// since been resolved.
 	// https://github.com/torvalds/linux/blob/v4.9/fs/exec.c#L1290-L1318
+	_ = fifoFile.Close()
 	_ = l.fifoFile.Close()
 
-	s := l.config.SpecState
-	s.Pid = unix.Getpid()
-	s.Status = specs.StateCreated
-	if err := l.config.Config.Hooks.Run(configs.StartContainer, s); err != nil {
-		return err
+	if s := l.config.SpecState; s != nil {
+		s.Pid = unix.Getpid()
+		s.Status = specs.StateCreated
+		if err := l.config.Config.Hooks.Run(configs.StartContainer, s); err != nil {
+			return err
+		}
 	}
 
 	// Close all file descriptors we are not passing to the container. This is
@@ -287,5 +301,5 @@ func (l *linuxStandardInit) Init() error {
 	if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
 		return err
 	}
-	return system.Exec(name, l.config.Args, os.Environ())
+	return linux.Exec(name, l.config.Args, l.config.Env)
 }

@@ -5,24 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/containerd/console"
-	"github.com/moby/sys/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/runc/internal/linux"
+	"github.com/opencontainers/runc/internal/pathrs"
 	"github.com/opencontainers/runc/libcontainer/capabilities"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
@@ -49,29 +50,55 @@ type network struct {
 	TempVethPeerName string `json:"temp_veth_peer_name"`
 }
 
-// initConfig is used for transferring parameters from Exec() to Init()
+// initConfig is used for transferring parameters from Exec() to Init().
+// It contains:
+//   - original container config;
+//   - some [Process] properties;
+//   - set of properties merged from the container config ([configs.Config])
+//     and the process ([Process]);
+//   - some properties that come from the container.
+//
+// When adding new fields, please make sure they go into the relevant section.
 type initConfig struct {
-	Args             []string              `json:"args"`
-	Env              []string              `json:"env"`
-	Cwd              string                `json:"cwd"`
-	Capabilities     *configs.Capabilities `json:"capabilities"`
-	ProcessLabel     string                `json:"process_label"`
-	AppArmorProfile  string                `json:"apparmor_profile"`
-	NoNewPrivileges  bool                  `json:"no_new_privileges"`
-	User             string                `json:"user"`
-	AdditionalGroups []string              `json:"additional_groups"`
-	Config           *configs.Config       `json:"config"`
-	Networks         []*network            `json:"network"`
-	PassedFilesCount int                   `json:"passed_files_count"`
-	ContainerID      string                `json:"containerid"`
-	Rlimits          []configs.Rlimit      `json:"rlimits"`
-	CreateConsole    bool                  `json:"create_console"`
-	ConsoleWidth     uint16                `json:"console_width"`
-	ConsoleHeight    uint16                `json:"console_height"`
-	RootlessEUID     bool                  `json:"rootless_euid,omitempty"`
-	RootlessCgroups  bool                  `json:"rootless_cgroups,omitempty"`
-	SpecState        *specs.State          `json:"spec_state,omitempty"`
-	Cgroup2Path      string                `json:"cgroup2_path,omitempty"`
+	// Config is the original container config.
+	Config *configs.Config `json:"config"`
+
+	// Properties that are unique to and come from [Process].
+
+	Args             []string `json:"args"`
+	Env              []string `json:"env"`
+	UID              int      `json:"uid"`
+	GID              int      `json:"gid"`
+	AdditionalGroups []int    `json:"additional_groups"`
+	Cwd              string   `json:"cwd"`
+	CreateConsole    bool     `json:"create_console"`
+	ConsoleWidth     uint16   `json:"console_width"`
+	ConsoleHeight    uint16   `json:"console_height"`
+	PassedFilesCount int      `json:"passed_files_count"`
+
+	// Properties that exists both in the container config and the process,
+	// as merged by [Container.newInitConfig] (process properties has preference).
+
+	AppArmorProfile string                `json:"apparmor_profile"`
+	Capabilities    *configs.Capabilities `json:"capabilities"`
+	NoNewPrivileges bool                  `json:"no_new_privileges"`
+	ProcessLabel    string                `json:"process_label"`
+	Rlimits         []configs.Rlimit      `json:"rlimits"`
+	IOPriority      *configs.IOPriority   `json:"io_priority,omitempty"`
+	Scheduler       *configs.Scheduler    `json:"scheduler,omitempty"`
+	CPUAffinity     *configs.CPUAffinity  `json:"cpu_affinity,omitempty"`
+
+	// Miscellaneous properties, filled in by [Container.newInitConfig]
+	// unless documented otherwise.
+
+	ContainerID string `json:"containerid"`
+	Cgroup2Path string `json:"cgroup2_path,omitempty"`
+
+	// Networks is filled in from container config by [initProcess.createNetworkInterfaces].
+	Networks []*network `json:"network"`
+
+	// SpecState is filled in by [initProcess.Start].
+	SpecState *specs.State `json:"spec_state,omitempty"`
 }
 
 // Init is part of "runc init" implementation.
@@ -185,8 +212,8 @@ func startInitialization() (retErr error) {
 		defer pidfdSocket.Close()
 	}
 
-	// clear the current process's environment to clean any libcontainer
-	// specific env vars.
+	// From here on, we don't need current process environment. It is not
+	// used directly anywhere below this point, but let's clear it anyway.
 	os.Clearenv()
 
 	defer func() {
@@ -209,10 +236,6 @@ func startInitialization() (retErr error) {
 }
 
 func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSocket, pidfdSocket, fifoFile, logPipe *os.File) error {
-	if err := populateProcessEnvironment(config.Env); err != nil {
-		return err
-	}
-
 	// Clean the RLIMIT_NOFILE cache in go runtime.
 	// Issue: https://github.com/opencontainers/runc/issues/4195
 	maybeClearRlimitNofileCache(config.Rlimits)
@@ -242,30 +265,6 @@ func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSock
 	return fmt.Errorf("unknown init type %q", t)
 }
 
-// populateProcessEnvironment loads the provided environment variables into the
-// current processes's environment.
-func populateProcessEnvironment(env []string) error {
-	for _, pair := range env {
-		name, val, ok := strings.Cut(pair, "=")
-		if !ok {
-			return errors.New("invalid environment variable: missing '='")
-		}
-		if name == "" {
-			return errors.New("invalid environment variable: name cannot be empty")
-		}
-		if strings.IndexByte(name, 0) >= 0 {
-			return fmt.Errorf("invalid environment variable %q: name contains nul byte (\\x00)", name)
-		}
-		if strings.IndexByte(val, 0) >= 0 {
-			return fmt.Errorf("invalid environment variable %q: value contains nul byte (\\x00)", name)
-		}
-		if err := os.Setenv(name, val); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // verifyCwd ensures that the current directory is actually inside the mount
 // namespace root of the current process.
 func verifyCwd() error {
@@ -278,10 +277,10 @@ func verifyCwd() error {
 	// details, and CVE-2024-21626 for the security issue that motivated this
 	// check.
 	//
-	// We have to use unix.Getwd() here because os.Getwd() has a workaround for
+	// We do not use os.Getwd() here because it has a workaround for
 	// $PWD which involves doing stat(.), which can fail if the current
 	// directory is inaccessible to the container process.
-	if wd, err := unix.Getwd(); errors.Is(err, unix.ENOENT) {
+	if wd, err := linux.Getwd(); errors.Is(err, unix.ENOENT) {
 		return errors.New("current working directory is outside of container mount namespace root -- possible container breakout detected")
 	} else if err != nil {
 		return fmt.Errorf("failed to verify if current working directory is safe: %w", err)
@@ -294,7 +293,7 @@ func verifyCwd() error {
 
 // finalizeNamespace drops the caps, sets the correct user
 // and working dir, and closes any leaked file descriptors
-// before executing the command inside the namespace
+// before executing the command inside the namespace.
 func finalizeNamespace(config *initConfig) error {
 	// Ensure that all unwanted fds we may have accidentally
 	// inherited are marked close-on-exec so they stay out of the
@@ -323,13 +322,15 @@ func finalizeNamespace(config *initConfig) error {
 		}
 	}
 
-	caps := &configs.Capabilities{}
-	if config.Capabilities != nil {
-		caps = config.Capabilities
-	} else if config.Config.Capabilities != nil {
-		caps = config.Config.Capabilities
+	// We should set envs after we are in the jail of the container.
+	// Please see https://github.com/opencontainers/runc/issues/4688
+	env, err := prepareEnv(config.Env, config.UID)
+	if err != nil {
+		return err
 	}
-	w, err := capabilities.New(caps)
+	config.Env = env
+
+	w, err := capabilities.New(config.Capabilities)
 	if err != nil {
 		return err
 	}
@@ -378,12 +379,13 @@ func setupConsole(socket *os.File, config *initConfig, mount bool) error {
 	// the UID owner of the console to be the user the process will run as (so
 	// they can actually control their console).
 
-	pty, slavePath, err := console.NewPty()
+	pty, peerPty, err := safeAllocPty()
 	if err != nil {
 		return err
 	}
 	// After we return from here, we don't need the console anymore.
 	defer pty.Close()
+	defer peerPty.Close()
 
 	if config.ConsoleHeight != 0 && config.ConsoleWidth != 0 {
 		err = pty.Resize(console.WinSize{
@@ -397,7 +399,7 @@ func setupConsole(socket *os.File, config *initConfig, mount bool) error {
 
 	// Mount the console inside our rootfs.
 	if mount {
-		if err := mountConsole(slavePath); err != nil {
+		if err := mountConsole(peerPty); err != nil {
 			return err
 		}
 	}
@@ -408,7 +410,7 @@ func setupConsole(socket *os.File, config *initConfig, mount bool) error {
 	runtime.KeepAlive(pty)
 
 	// Now, dup over all the things.
-	return dupStdio(slavePath)
+	return dupStdio(peerPty)
 }
 
 // syncParentReady sends to the given pipe a JSON payload which indicates that
@@ -459,58 +461,23 @@ func syncParentSeccomp(pipe *syncSocket, seccompFd int) error {
 	return readSync(pipe, procSeccompDone)
 }
 
-// setupUser changes the groups, gid, and uid for the user inside the container
+// setupUser changes the groups, gid, and uid for the user inside the container.
 func setupUser(config *initConfig) error {
-	// Set up defaults.
-	defaultExecUser := user.ExecUser{
-		Uid:  0,
-		Gid:  0,
-		Home: "/",
-	}
-
-	passwdPath, err := user.GetPasswdPath()
-	if err != nil {
-		return err
-	}
-
-	groupPath, err := user.GetGroupPath()
-	if err != nil {
-		return err
-	}
-
-	execUser, err := user.GetExecUserPath(config.User, &defaultExecUser, passwdPath, groupPath)
-	if err != nil {
-		return err
-	}
-
-	var addGroups []int
-	if len(config.AdditionalGroups) > 0 {
-		addGroups, err = user.GetAdditionalGroupsPath(config.AdditionalGroups, groupPath)
-		if err != nil {
-			return err
-		}
-	}
-
-	if config.RootlessEUID {
-		// We cannot set any additional groups in a rootless container and thus
-		// we bail if the user asked us to do so. TODO: We currently can't do
-		// this check earlier, but if libcontainer.Process.User was typesafe
-		// this might work.
-		if len(addGroups) > 0 {
-			return errors.New("cannot set any additional groups in a rootless container")
-		}
-	}
-
 	// Before we change to the container's user make sure that the processes
 	// STDIO is correctly owned by the user that we are switching to.
-	if err := fixStdioPermissions(execUser); err != nil {
+	if err := fixStdioPermissions(config.UID); err != nil {
 		return err
 	}
 
 	// We don't need to use /proc/thread-self here because setgroups is a
 	// per-userns file and thus is global to all threads in a thread-group.
 	// This lets us avoid having to do runtime.LockOSThread.
-	setgroups, err := os.ReadFile("/proc/self/setgroups")
+	var setgroups []byte
+	setgroupsFile, err := pathrs.ProcSelfOpen("setgroups", unix.O_RDONLY)
+	if err == nil {
+		setgroups, err = io.ReadAll(setgroupsFile)
+		_ = setgroupsFile.Close()
+	}
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -519,54 +486,43 @@ func setupUser(config *initConfig) error {
 	// There's nothing we can do about /etc/group entries, so we silently
 	// ignore setting groups here (since the user didn't explicitly ask us to
 	// set the group).
-	allowSupGroups := !config.RootlessEUID && string(bytes.TrimSpace(setgroups)) != "deny"
+	allowSupGroups := !config.Config.RootlessEUID && string(bytes.TrimSpace(setgroups)) != "deny"
 
 	if allowSupGroups {
-		suppGroups := append(execUser.Sgids, addGroups...)
-		if err := unix.Setgroups(suppGroups); err != nil {
+		if err := unix.Setgroups(config.AdditionalGroups); err != nil {
 			return &os.SyscallError{Syscall: "setgroups", Err: err}
 		}
 	}
 
-	if err := unix.Setgid(execUser.Gid); err != nil {
+	if err := unix.Setgid(config.GID); err != nil {
 		if err == unix.EINVAL {
-			return fmt.Errorf("cannot setgid to unmapped gid %d in user namespace", execUser.Gid)
+			return fmt.Errorf("cannot setgid to unmapped gid %d in user namespace", config.GID)
 		}
 		return err
 	}
-	if err := unix.Setuid(execUser.Uid); err != nil {
+	if err := unix.Setuid(config.UID); err != nil {
 		if err == unix.EINVAL {
-			return fmt.Errorf("cannot setuid to unmapped uid %d in user namespace", execUser.Uid)
+			return fmt.Errorf("cannot setuid to unmapped uid %d in user namespace", config.UID)
 		}
 		return err
-	}
-
-	// if we didn't get HOME already, set it based on the user's HOME
-	if envHome := os.Getenv("HOME"); envHome == "" {
-		if err := os.Setenv("HOME", execUser.Home); err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-// fixStdioPermissions fixes the permissions of PID 1's STDIO within the container to the specified user.
+// fixStdioPermissions fixes the permissions of PID 1's STDIO within the container to the specified uid.
 // The ownership needs to match because it is created outside of the container and needs to be
 // localized.
-func fixStdioPermissions(u *user.ExecUser) error {
-	var null unix.Stat_t
-	if err := unix.Stat("/dev/null", &null); err != nil {
-		return &os.PathError{Op: "stat", Path: "/dev/null", Err: err}
-	}
+func fixStdioPermissions(uid int) error {
 	for _, file := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
 		var s unix.Stat_t
 		if err := unix.Fstat(int(file.Fd()), &s); err != nil {
 			return &os.PathError{Op: "fstat", Path: file.Name(), Err: err}
 		}
 
-		// Skip chown if uid is already the one we want or any of the STDIO descriptors
-		// were redirected to /dev/null.
-		if int(s.Uid) == u.Uid || s.Rdev == null.Rdev {
+		// Skip chown if:
+		// - uid is already the one we want, or
+		// - fd is opened to /dev/null.
+		if int(s.Uid) == uid || isDevNull(&s) {
 			continue
 		}
 
@@ -576,16 +532,17 @@ func fixStdioPermissions(u *user.ExecUser) error {
 		// that users expect to be able to actually use their console. Without
 		// this code, you couldn't effectively run as a non-root user inside a
 		// container and also have a console set up.
-		if err := file.Chown(u.Uid, int(s.Gid)); err != nil {
-			// If we've hit an EINVAL then s.Gid isn't mapped in the user
-			// namespace. If we've hit an EPERM then the inode's current owner
+		if err := file.Chown(uid, -1); err != nil {
+			// If we've hit an EPERM then the inode's current owner
 			// is not mapped in our user namespace (in particular,
 			// privileged_wrt_inode_uidgid() has failed). Read-only
 			// /dev can result in EROFS error. In any case, it's
 			// better for us to just not touch the stdio rather
 			// than bail at this point.
-
-			if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS) {
+			// EINVAL should never happen, as it would mean the uid
+			// is not mapped, we expect this function to be called
+			// with a mapped uid.
+			if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS) {
 				continue
 			}
 			return err
@@ -661,18 +618,58 @@ func setupRlimits(limits []configs.Rlimit, pid int) error {
 	return nil
 }
 
-func setupScheduler(config *configs.Config) error {
+func setupScheduler(config *initConfig) error {
+	if config.Scheduler == nil {
+		return nil
+	}
 	attr, err := configs.ToSchedAttr(config.Scheduler)
 	if err != nil {
 		return err
 	}
 	if err := unix.SchedSetAttr(0, attr, 0); err != nil {
-		if errors.Is(err, unix.EPERM) && config.Cgroups.CpusetCpus != "" {
+		if errors.Is(err, unix.EPERM) && config.Config.Cgroups.CpusetCpus != "" {
 			return errors.New("process scheduler can't be used together with AllowedCPUs")
 		}
 		return fmt.Errorf("error setting scheduler: %w", err)
 	}
 	return nil
+}
+
+func setupIOPriority(config *initConfig) error {
+	const ioprioWhoPgrp = 1
+
+	ioprio := config.IOPriority
+	if ioprio == nil {
+		return nil
+	}
+	class := 0
+	switch ioprio.Class {
+	case specs.IOPRIO_CLASS_RT:
+		class = 1
+	case specs.IOPRIO_CLASS_BE:
+		class = 2
+	case specs.IOPRIO_CLASS_IDLE:
+		class = 3
+	default:
+		return fmt.Errorf("invalid io priority class: %s", ioprio.Class)
+	}
+
+	// Combine class and priority into a single value
+	// https://github.com/torvalds/linux/blob/v5.18/include/uapi/linux/ioprio.h#L5-L17
+	iop := (class << 13) | ioprio.Priority
+	_, _, errno := unix.RawSyscall(unix.SYS_IOPRIO_SET, ioprioWhoPgrp, 0, uintptr(iop))
+	if errno != 0 {
+		return fmt.Errorf("failed to set io priority: %w", errno)
+	}
+	return nil
+}
+
+func setupMemoryPolicy(config *configs.Config) error {
+	mpol := config.MemoryPolicy
+	if mpol == nil {
+		return nil
+	}
+	return linux.SetMempolicy(mpol.Mode|mpol.Flags, config.MemoryPolicy.Nodes)
 }
 
 func setupPersonality(config *configs.Config) error {
@@ -696,12 +693,12 @@ func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 		}
 	}
 
-	if err := m.Freeze(configs.Frozen); err != nil {
+	if err := m.Freeze(cgroups.Frozen); err != nil {
 		logrus.Warn(err)
 	}
 	pids, err := m.GetAllPids()
 	if err != nil {
-		if err := m.Freeze(configs.Thawed); err != nil {
+		if err := m.Freeze(cgroups.Thawed); err != nil {
 			logrus.Warn(err)
 		}
 		return err
@@ -712,7 +709,7 @@ func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 			logrus.Warnf("kill %d: %v", pid, err)
 		}
 	}
-	if err := m.Freeze(configs.Thawed); err != nil {
+	if err := m.Freeze(cgroups.Thawed); err != nil {
 		logrus.Warn(err)
 	}
 

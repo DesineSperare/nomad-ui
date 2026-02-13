@@ -1,6 +1,7 @@
 #ifndef NSENTER_LOG_H
 #define NSENTER_LOG_H
 
+#include <stdbool.h>
 #include <stdio.h>
 
 /*
@@ -20,18 +21,25 @@
  */
 void setup_logpipe(void);
 
+bool log_enabled_for(int level);
+
 void write_log(int level, const char *format, ...) __attribute__((format(printf, 2, 3)));
 
 extern int logfd;
-#define bail(fmt, ...)                                               \
-	do {                                                         \
-		if (logfd < 0)                                       \
-			fprintf(stderr, "FATAL: " fmt ": %m\n",      \
-				##__VA_ARGS__);                      \
-		else                                                 \
-			write_log(FATAL, fmt ": %m", ##__VA_ARGS__); \
-		exit(1);                                             \
+
+/* bailx logs a message to logfd (or stderr, if logfd is not available)
+ * and terminates the program.
+ */
+#define bailx(fmt, ...)                                                     \
+	do {                                                                \
+		if (logfd < 0)                                              \
+			fprintf(stderr, "FATAL: " fmt "\n", ##__VA_ARGS__); \
+		else                                                        \
+			write_log(FATAL, fmt, ##__VA_ARGS__);               \
+		exit(1);                                                    \
 	} while(0)
 
+/* bail is the same as bailx, except it also adds ": %m" (errno). */
+#define bail(fmt, ...) bailx(fmt ": %m", ##__VA_ARGS__)
 
 #endif /* NSENTER_LOG_H */
