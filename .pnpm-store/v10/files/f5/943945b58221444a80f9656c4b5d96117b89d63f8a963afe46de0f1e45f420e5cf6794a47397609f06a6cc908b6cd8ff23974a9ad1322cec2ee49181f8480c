@@ -1,2 +1,0 @@
-import * as QUnit from 'qunit';
-export declare function setupQUnitA11yAuditToggle(qunit: QUnit): void;

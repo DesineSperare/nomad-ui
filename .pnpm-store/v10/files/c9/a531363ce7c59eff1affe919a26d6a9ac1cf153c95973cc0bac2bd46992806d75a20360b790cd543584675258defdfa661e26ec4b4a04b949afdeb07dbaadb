@@ -1,2 +1,0 @@
-export default function isElementDescriptor(...args: unknown[]): boolean;
-//# sourceMappingURL=is-element-descriptor.d.ts.map
