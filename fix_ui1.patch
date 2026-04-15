@@ -1,0 +1,801 @@
+Subject: [PATCH] fix ui
+---
+Index: ui/app/components/global-header.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/global-header.hbs b/ui/app/components/global-header.hbs
+--- a/ui/app/components/global-header.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/global-header.hbs	(date 1774719474168)
+@@ -1,9 +1,3 @@
+-{{!
+-  Copyright IBM Corp. 2015, 2025
+-  SPDX-License-Identifier: BUSL-1.1
+-~}}
+-
+-{{! template-lint-disable no-duplicate-landmark-elements }}
+ <nav class="navbar is-primary" title="navigation">
+   <div class="navbar-brand">
+     <span
+@@ -15,62 +9,15 @@
+     >
+       <HamburgerMenu />
+     </span>
+-    <LinkTo @route="jobs" class="navbar-item is-logo" aria-label="Home">
+-      <NomadLogo />
++    <LinkTo @route="jobs" class="navbar-item is-logo cdp-logo-text" aria-label="Home">
++     ЦУП
+     </LinkTo>
+-    {{#if this.system.agent.config.UI.Label.Text}}
+-      <div class="custom-label" style={{this.labelStyles}}>
+-        {{this.system.agent.config.UI.Label.Text}}
+-      </div>
+-    {{/if}}
+-  </div>
+-  {{#if this.system.fuzzySearchEnabled}}
+-    {{! template-lint-disable simple-unless }}
+-    {{#unless (media "isMobile")}}
+-      <GlobalSearch::Control />
+-    {{/unless}}
+-  {{/if}}
+-  <div class="navbar-end">
+-    {{#if this.system.agent.config.UI.Consul.BaseUIURL}}
+-      <a
+-        data-test-header-consul-link
+-        href={{this.system.agent.config.UI.Consul.BaseUIURL}}
+-        target="_blank"
+-        rel="noopener noreferrer"
+-        class="navbar-item"
+-      >
+-        Consul
+-      </a>
+-    {{/if}}
+-    {{#if this.system.agent.config.UI.Vault.BaseUIURL}}
+-      <a
+-        data-test-header-vault-link
+-        href={{this.system.agent.config.UI.Vault.BaseUIURL}}
+-        target="_blank"
+-        rel="noopener noreferrer"
+-        class="navbar-item"
+-      >
+-        Vault
+-      </a>
+-    {{/if}}
+-    <a
+-      href="https://developer.hashicorp.com/nomad/docs"
+-      target="_blank"
+-      rel="noopener noreferrer"
+-      class="navbar-item"
+-    >
+-      Documentation
+-    </a>
+-    <ProfileNavbarItem />
+   </div>
+ </nav>
+ <div class="navbar is-secondary">
+-  <div class="navbar-item is-gutter">
+-    <RegionSwitcher @decoration="is-outlined" />
+-  </div>
+   <nav class="breadcrumb is-large" title="breadcrumb navigation">
+     <ul>
+       {{yield}}
+     </ul>
+   </nav>
+-</div>
++</div>
+\ No newline at end of file
+Index: ui/app/services/sockets.js
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/services/sockets.js b/ui/app/services/sockets.js
+--- a/ui/app/services/sockets.js	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/services/sockets.js	(date 1776283578857)
+@@ -13,42 +13,6 @@
+   @service system;
+ 
+   getTaskStateSocket(taskState, command) {
+-    const mirageEnabled =
+-      config.environment !== 'production' &&
+-      config['ember-cli-mirage'] &&
+-      config['ember-cli-mirage'].enabled !== false;
+-
+-    if (mirageEnabled) {
+-      return new Object({
+-        messageDisplayed: false,
+-
+-        send(e) {
+-          if (!this.messageDisplayed) {
+-            this.messageDisplayed = true;
+-            this.onmessage({
+-              data: `{"stdout":{"data":"${btoa(
+-                'unsupported in Mirage\n\r'
+-              )}"}}`,
+-            });
+-          } else {
+-            this.onmessage({ data: e.replace('stdin', 'stdout') });
+-          }
+-        },
+-      });
+-    } else {
+-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+-      const applicationAdapter = getOwner(this).lookup('adapter:application');
+-      const prefix = `${
+-        applicationAdapter.host || window.location.host
+-      }/${applicationAdapter.urlPrefix()}`;
+-      const region = this.system.activeRegion;
+-
+-      return new WebSocket(
+-        `${protocol}//${prefix}/client/allocation/${taskState.allocation.id}` +
+-          `/exec?task=${taskState.name}&tty=true&ws_handshake=true` +
+-          (region ? `&region=${region}` : '') +
+-          `&command=${encodeURIComponent(`["${command}"]`)}`
+-      );
+-    }
++      throw new Error('Exec is disabled in this build');
+   }
+ }
+Index: ui/app/components/job-editor/read.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/job-editor/read.hbs b/ui/app/components/job-editor/read.hbs
+--- a/ui/app/components/job-editor/read.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/job-editor/read.hbs	(date 1774718477326)
+@@ -19,14 +19,14 @@
+ 
+         <Tooltip @condition={{unless @data.hasSpecification true false}} @isFullText={{true}} @text="A jobspec file was not submitted when this job was run. You can still view and edit the expanded JSON format.">
+             <div class="job-definition-select {{unless @data.hasSpecification " disabled"}}" data-test-select={{@data.view}}>
+-                <button 
++                <button
+                     class="button is-small is-borderless {{if (eq @data.view "job-spec") "is-active"}}"
+                     type="button"
+                     {{on "click" (fn @fns.onSelect "job-spec")}}
+                 >
+                     Job Spec
+                 </button>
+-                <button 
++                <button
+                     class="button is-small is-borderless {{if (eq @data.view "full-definition") "is-active"}}"
+                     type="button"
+                     {{on "click" (fn @fns.onSelect "full-definition")}}
+@@ -34,32 +34,23 @@
+                 >
+                     Full Definition
+                 </button>
+-            </div>        
++            </div>
+         </Tooltip>
+ 
+-        <button
+-            class="button is-light is-compact"
+-            type="button"
+-            {{on "click" @fns.onEdit}}
+-            data-test-edit-job
+-        >
+-            Edit
+-        </button>
+-
+       </div>
+     </div>
+     <div class="boxed-section-body is-full-bleed">
+     {{#if (eq @data.view "job-spec")}}
+-        <div 
++        <div
+             data-test-job-spec-view
+             {{code-mirror
+             content=@data.definition
+             mode=(if (eq @data.format "json") "javascript" "ruby")
+             readOnly=true
+-            screenReaderLabel="Job specification"          
++            screenReaderLabel="Job specification"
+             theme="hashi-read-only"
+             lineWrapping=@data.shouldWrap
+-            }} 
++            }}
+         />
+     {{else}}
+         <div
+Index: ui/app/components/job-page/parts/title.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/job-page/parts/title.hbs b/ui/app/components/job-page/parts/title.hbs
+--- a/ui/app/components/job-page/parts/title.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/job-page/parts/title.hbs	(date 1776280323249)
+@@ -35,7 +35,6 @@
+           <ActionsDropdown @actions={{this.job.actions}} />
+         {{/if}}
+       {{/if}}
+-      <Exec::OpenButton @job={{this.job}} />
+       <TwoStepButton
+         data-test-stop
+         @alignRight={{true}}
+@@ -95,45 +94,6 @@
+             action=(perform this.startJob true)
+           }}
+         />
+-      {{else}}
+-        {{#if this.job.hasStableNonCurrentVersion}}
+-          <TwoStepButton
+-            data-test-revert
+-            @alignRight={{true}}
+-            @idleText="Revert to last stable version (v{{this.job.latestStableVersion.number}})"
+-            @disabled={{not (can "revert job" namespace=this.job.namespace)}}
+-            @title={{if (can "revert job" namespace=this.job.namespace) null "You don’t have permission to revert jobs"}}
+-            @cancelText="Cancel"
+-            @confirmText="Yes, Revert to last stable version"
+-            @confirmationMessage="Are you sure you want to revert to the last stable version?"
+-            @awaitingConfirmation={{this.revertTo.isRunning}}
+-            @onConfirm={{perform this.revertTo this.job.latestStableVersion}}
+-          />
+-        {{else if
+-          (and
+-            (not this.job.hasVersionStability)
+-            this.job.latestVersion
+-          )
+-        }}
+-          <TwoStepButton
+-            data-test-revert
+-            @alignRight={{true}}
+-            @idleText="Revert to last version (v{{this.job.latestVersion.number}})"
+-            @cancelText="Cancel"
+-            @confirmText="Yes, Revert to last version"
+-            @confirmationMessage="Are you sure you want to revert to the last version?"
+-            @awaitingConfirmation={{this.revertTo.isRunning}}
+-            @onConfirm={{perform this.revertTo this.job.latestVersion}}
+-          />
+-          <Hds::Button
+-            data-test-edit-and-resubmit
+-            @color="primary" @isInline={{true}} @text="Edit and Resubmit job" @route={{"jobs.job.definition" this.job.id}} @query={{hash isEditing=true}} />
+-        {{else}}
+-          <Hds::Button
+-            data-test-edit-and-resubmit
+-            {{hds-tooltip "This job has failed and has no stable previous version to fall back to. You can edit and resubmit the job to try again." options=(hash placement="bottom")}}
+-            @color="primary" @isInline={{true}} @text="Edit and Resubmit job" @route={{"jobs.job.definition" this.job.id}} @query={{hash isEditing=true}} />
+-        {{/if}}
+       {{/if}}
+     {{/if}}
+   </PH.Actions>
+Index: ui/app/components/task-sub-row.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/task-sub-row.hbs b/ui/app/components/task-sub-row.hbs
+--- a/ui/app/components/task-sub-row.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/task-sub-row.hbs	(date 1774719827727)
+@@ -10,12 +10,6 @@
+ 	}}
+ >
+ 	<td colspan={{@namespan}}>
+-		<div class="name-grid">
+-			<LinkTo title={{this.task.name}} class="task-name" @route="allocations.allocation.task" @models={{array this.task.allocation this.task}}>{{this.task.name}}</LinkTo>
+-			<button type="button" class="logs-sidebar-trigger button is-borderless is-inline is-compact" onclick={{action "handleTaskLogsClick" this.task}}>
+-				<Hds::Icon @name="logs" @isInline={{true}} />View Logs
+-			</button>
+-		</div>
+ 	</td>
+ 	<td data-test-cpu class="is-1 has-text-centered">
+ 		{{#if this.task.isRunning}}
+Index: ui/app/templates/jobs/job/task-group.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/templates/jobs/job/task-group.hbs b/ui/app/templates/jobs/job/task-group.hbs
+--- a/ui/app/templates/jobs/job/task-group.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/templates/jobs/job/task-group.hbs	(date 1774720165451)
+@@ -24,24 +24,6 @@
+       {{this.model.name}}
+     </span>
+     <div>
+-      <Exec::OpenButton @job={{this.model.job}} @taskGroup={{this.model}} />
+-      {{#if this.model.scaling}}
+-        <StepperInput
+-          data-test-task-group-count-stepper
+-          aria-label={{this.tooltipText}}
+-          @min={{this.model.scaling.min}}
+-          @max={{this.model.scaling.max}}
+-          @value={{this.model.count}}
+-          @class="is-primary is-small"
+-          @disabled={{or
+-            this.model.job.runningDeployment
+-            (cannot "scale job" namespace=this.model.job.namespace.name)
+-          }}
+-          @onChange={{action "scaleTaskGroup"}}
+-        >
+-          Count
+-        </StepperInput>
+-      {{/if}}
+     </div>
+   </h1>
+   <div class="boxed-section is-small">
+Index: ui/app/components/job-subnav.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/job-subnav.hbs b/ui/app/components/job-subnav.hbs
+--- a/ui/app/components/job-subnav.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/job-subnav.hbs	(date 1774719717400)
+@@ -54,15 +54,6 @@
+           Allocations
+         </LinkTo>
+       </li>
+-      <li data-test-tab="evaluations">
+-        <LinkTo
+-          @route="jobs.job.evaluations"
+-          @model={{@job}}
+-          @activeClass="is-active"
+-        >
+-          Evaluations
+-        </LinkTo>
+-      </li>
+       {{#if this.shouldRenderClientsTab}}
+         <li data-test-tab="clients">
+           <LinkTo
+@@ -74,15 +65,6 @@
+           </LinkTo>
+         </li>
+       {{/if}}
+-      <li data-test-tab="services">
+-        <LinkTo
+-          @route="jobs.job.services"
+-          @model={{@job}}
+-          @activeClass="is-active"
+-        >
+-          Services
+-        </LinkTo>
+-      </li>
+     {{/unless}}
+     {{#if (can "list variables")}}
+       <li data-test-tab="variables">
+Index: ui/app/components/job-version.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/job-version.hbs b/ui/app/components/job-version.hbs
+--- a/ui/app/components/job-version.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/job-version.hbs	(date 1776275220197)
+@@ -78,15 +78,15 @@
+             <Hds::Button class="tag-button-primary" @text={{this.version.versionTag.name}} @color="primary" @size="small" @icon="tag" @iconPosition="leading" @isInline={{true}} {{on "click" (action "toggleEditTag")}} />
+           {{else}}
+             {{#if (can "tag version" namespace=this.version.job.namespace)}}
+-              <Hds::Button 
++              <Hds::Button
+                 data-test-version-tag
+-                class="tag-button-secondary" 
+-                @text="Tag this version" 
+-                @color="secondary" 
+-                @size="small" 
+-                @icon="tag" 
+-                @iconPosition="leading" 
+-                @isInline={{true}} {{on "click" (action "toggleEditTag")}} 
++                class="tag-button-secondary"
++                @text="Tag this version"
++                @color="secondary"
++                @size="small"
++                @icon="tag"
++                @iconPosition="leading"
++                @isInline={{true}} {{on "click" (action "toggleEditTag")}}
+               />
+             {{/if}}
+           {{/if}}
+@@ -95,64 +95,6 @@
+           </span>
+         </div>
+         <div class="version-options">
+-          {{#unless this.isCurrent}}
+-            {{#if (eq this.cloneButtonStatus 'idle')}}
+-              {{#if (can "run job")}}
+-                <Hds::Button
+-                  data-test-clone-and-edit
+-                  @text="Clone and Edit"
+-                  @color="secondary"
+-                  @size="small"
+-                  @isInline={{true}}
+-                  {{on "click" (action (mut this.cloneButtonStatus) "confirming")}}
+-                />
+-              {{/if}}
+-                <TwoStepButton
+-                  data-test-revert-to
+-                  @classes={{hash
+-                    idleButton="is-warning is-outlined"
+-                    confirmButton="is-warning"}}
+-                  @fadingBackground={{true}}
+-                  @idleText="Revert Version"
+-                  @disabled={{not (can "revert job" namespace=this.version.job.namespace)}}
+-                  @title={{if (can "revert job" namespace=this.version.job.namespace) null "You don’t have permission to revert"}}
+-                  @cancelText="Cancel"
+-                  @confirmText="Yes, Revert Version"
+-                  @confirmationMessage="Are you sure you want to revert to this version?"
+-                  @inlineText={{true}}
+-                  @size="small"
+-                  @awaitingConfirmation={{this.revertTo.isRunning}}
+-                  @onConfirm={{perform this.revertTo}}
+-                />
+-              {{else if (eq this.cloneButtonStatus 'confirming')}}
+-                <Hds::Button
+-                  data-test-cancel-clone
+-                  @text="Cancel"
+-                  @color="secondary"
+-                  @size="small"
+-                  @isInline={{true}}
+-                  {{on "click" (action (mut this.cloneButtonStatus) "idle")}}
+-                />
+-                {{#if (can "start job" namespace=this.version.job.namespace)}}
+-                  <Hds::Button
+-                    data-test-clone-as-new-version
+-                    @text="Clone as New Version of {{this.version.job.name}}"
+-                    @color="secondary"
+-                    @size="small"
+-                    @isInline={{true}}
+-                    {{on "click" (action this.cloneAsNewVersion)}}
+-                  />
+-                {{/if}}
+-                <Hds::Button
+-                  data-test-clone-as-new-job
+-                  @text="Clone as New Job"
+-                  @color="secondary"
+-                  @size="small"
+-                  @isInline={{true}}
+-                  {{on "click" (action this.cloneAsNewJob)}}
+-                />
+-            {{/if}}
+-          {{/unless}}
+         </div>
+       {{/if}}
+     </footer>
+Index: ui/app/router.js
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/router.js b/ui/app/router.js
+--- a/ui/app/router.js	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/router.js	(date 1776277571109)
+@@ -12,12 +12,6 @@
+ }
+ 
+ Router.map(function () {
+-  this.route('exec', { path: '/exec/:job_name' }, function () {
+-    this.route('task-group', { path: '/:task_group_name' }, function () {
+-      this.route('task', { path: '/:task_name' });
+-    });
+-  });
+-
+   this.route('jobs', function () {
+     this.route('run', function () {
+       this.route('templates', function () {
+Index: ui/app/components/gutter-menu.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/gutter-menu.hbs b/ui/app/components/gutter-menu.hbs
+--- a/ui/app/components/gutter-menu.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/gutter-menu.hbs	(date 1774735046202)
+@@ -19,9 +19,7 @@
+       >
+         <HamburgerMenu />
+       </span>
+-      <span class="logo-container">
+-        <NomadLogo />
+-      </span>
++      <span class="navbar-brand-text">Mission Control</span>
+     </header>
+     <aside class="menu">
+       {{#if this.system.shouldShowRegions}}
+@@ -49,43 +47,6 @@
+             Jobs
+           </LinkTo>
+         </li>
+-        {{#if (can "accept recommendation")}}
+-          <li
+-            {{keyboard-shortcut
+-              menuLevel=true
+-              pattern=(array "g" "o")
+-              action=(action this.transitionTo 'optimize')
+-            }}
+-          >
+-            <LinkTo
+-              @route="optimize"
+-              @activeClass="is-active"
+-              data-test-gutter-link="optimize"
+-            >
+-              Optimize
+-            </LinkTo>
+-          </li>
+-        {{/if}}
+-        <li {{keyboard-shortcut menuLevel=true pattern=(array "g" "r") }}>
+-          <LinkTo
+-            @route="storage"
+-            @activeClass="is-active"
+-            data-test-gutter-link="storage"
+-          >
+-            Storage
+-          </LinkTo>
+-        </li>
+-        {{#if (can "list variables")}}
+-        <li {{keyboard-shortcut menuLevel=true pattern=(array "g" "v") }}>
+-          <LinkTo
+-            @route="variables"
+-            @activeClass="is-active"
+-            data-test-gutter-link="variables"
+-          >
+-            Variables
+-          </LinkTo>
+-        </li>
+-        {{/if}}
+       </ul>
+       <p class="menu-label">
+         Cluster
+@@ -118,37 +79,6 @@
+             Topology
+           </LinkTo>
+         </li>
+-      </ul>
+-      <p class="menu-label">
+-        Operations
+-      </p>
+-      <ul class="menu-list">
+-        <li {{keyboard-shortcut menuLevel=true pattern=(array "g" "e") }}>
+-          <LinkTo
+-            @route="evaluations"
+-            @activeClass="is-active"
+-            data-test-gutter-link="evaluations"
+-          >
+-            Evaluations
+-          </LinkTo>
+-        </li>
+-        {{#if (can "list policies")}}
+-          <li
+-            {{keyboard-shortcut
+-              menuLevel=true
+-              pattern=(array "g" "a")
+-              action=(action this.transitionTo 'administration')
+-            }}
+-          >
+-            <LinkTo
+-              @route="administration"
+-              @activeClass="is-active"
+-              data-test-gutter-link="administration"
+-            >
+-              Administration
+-            </LinkTo>
+-          </li>
+-        {{/if}}
+       </ul>
+     </aside>
+     {{#if this.system.agent.version}}
+Index: ui/app/templates/clients/client/index.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/templates/clients/client/index.hbs b/ui/app/templates/clients/client/index.hbs
+--- a/ui/app/templates/clients/client/index.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/templates/clients/client/index.hbs	(date 1776276342462)
+@@ -167,27 +167,7 @@
+       </h1>
+       <p>
+         <label class="is-interactive">
+-          <Toggle
+-            data-test-eligibility-toggle
+-            @isActive={{this.model.isEligible}}
+-            @isDisabled={{or
+-              this.setEligibility.isRunning
+-              this.model.isDraining
+-              (cannot "write client")
+-            }}
+-            @onToggle={{perform this.setEligibility (not this.model.isEligible)
+-            }}
+-          >
+-            Eligible
+-          </Toggle>
+         </label>
+-        <Hds::TooltipButton
+-          @text="Only eligible clients can receive allocations"
+-          aria-label="More information"
+-          class="is-faded"
+-        >
+-          <Hds::Icon @name="info" @isInline={{true}} />
+-        </Hds::TooltipButton>
+         <span
+           data-test-node-id
+           class="tag is-hollow is-small no-text-transform"
+@@ -198,25 +178,8 @@
+       </p>
+     </div>
+     <div class="toolbar-item is-right-aligned is-top-aligned">
+-      {{#if this.model.isDraining}}
+-        <TwoStepButton
+-          data-test-drain-stop
+-          @idleText="Stop Drain"
+-          @cancelText="Cancel"
+-          @confirmText="Yes, Stop Drain"
+-          @confirmationMessage="Are you sure you want to stop this drain?"
+-          @awaitingConfirmation={{this.stopDrain.isRunning}}
+-          @onConfirm={{perform this.stopDrain}}
+-        />
+-      {{/if}}
+     </div>
+     <div class="toolbar-item is-right-aligned is-top-aligned">
+-      <DrainPopover
+-        @client={{this.model}}
+-        @isDisabled={{cannot "write client"}}
+-        @onDrain={{action "drainNotify"}}
+-        @onError={{action "setDrainError"}}
+-      />
+     </div>
+   </div>
+   <div class="boxed-section is-small">
+Index: ui/app/components/task-subnav.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/task-subnav.hbs b/ui/app/components/task-subnav.hbs
+--- a/ui/app/components/task-subnav.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/task-subnav.hbs	(date 1774719971981)
+@@ -6,7 +6,5 @@
+ <div class="tabs is-subnav" {{did-insert this.keyboard.registerNav type="subnav"}} {{will-destroy this.keyboard.unregisterSubnav}}>
+   <ul>
+     <li><LinkTo @route="allocations.allocation.task.index" @models={{array this.task.allocation this.task}} @activeClass="is-active">Overview</LinkTo></li>
+-    <li><LinkTo @route="allocations.allocation.task.logs" @models={{array this.task.allocation this.task}} @activeClass="is-active">Logs</LinkTo></li>
+-    <li><LinkTo @route="allocations.allocation.task.fs-root" @models={{array this.task.allocation this.task}} class={{if this.filesLinkActive "is-active"}}>Files</LinkTo></li>
+   </ul>
+ </div>
+Index: ui/app/templates/allocations/allocation/index.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/templates/allocations/allocation/index.hbs b/ui/app/templates/allocations/allocation/index.hbs
+--- a/ui/app/templates/allocations/allocation/index.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/templates/allocations/allocation/index.hbs	(date 1776273761654)
+@@ -40,12 +40,6 @@
+     </div>
+     <div>
+       {{#if this.model.isRunning}}
+-        <div class="two-step-button">
+-          <Exec::OpenButton
+-            @job={{this.model.job}}
+-            @allocation={{this.model}}
+-          />
+-        </div>
+         <TwoStepButton
+           data-test-stop
+           @alignRight={{true}}
+@@ -74,20 +68,6 @@
+           }}
+           @onConfirm={{perform this.restartAllocation}}
+         />
+-        <TwoStepButton
+-          data-test-restart-all
+-          @alignRight={{true}}
+-          @idleText="Restart All Tasks"
+-          @cancelText="Cancel Restart"
+-          @confirmText="Yes, Restart All Tasks"
+-          @confirmationMessage="Are you sure? This will restart all tasks in-place."
+-          @awaitingConfirmation={{this.restartAllocation.isRunning}}
+-          @disabled={{or
+-            this.stopAllocation.isRunning
+-            this.restartAllocation.isRunning
+-          }}
+-          @onConfirm={{perform this.restartAll}}
+-        />
+       {{/if}}
+     </div>
+   </h1>
+@@ -304,7 +284,7 @@
+           <t.body as |row|>
+             <tr data-test-service class="is-interactive {{if (eq this.activeService row.model) "is-active"}}"
+               {{on "click" (fn this.handleServiceClick row.model)}}
+-              {{keyboard-shortcut 
++              {{keyboard-shortcut
+                 enumerated=true
+                 action=(fn this.handleServiceClick row.model)
+               }}
+Index: ui/app/components/job-editor.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/components/job-editor.hbs b/ui/app/components/job-editor.hbs
+--- a/ui/app/components/job-editor.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/components/job-editor.hbs	(date 1774718203280)
+@@ -4,12 +4,7 @@
+ ~}}
+ 
+ <div>
+-  <JobEditor::Alert 
+-    @data={{merge (hash error=this.error stage=this.stage) this.data}}
+-    @fns={{this.fns}}
+-  />
+-
+-    {{#if (eq @context "new")}}
++      {{#if (eq @context "new")}}
+       <header class="run-job-header">
+         <h1 class="title is-3">Run a job</h1>
+         <p>
+Index: ui/app/templates/jobs/index.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/templates/jobs/index.hbs b/ui/app/templates/jobs/index.hbs
+--- a/ui/app/templates/jobs/index.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/templates/jobs/index.hbs	(date 1774736594780)
+@@ -105,22 +105,6 @@
+         />
+       {{/if}}
+ 
+-      <div
+-        {{keyboard-shortcut
+-          label="Run Job"
+-          pattern=(array "r" "u" "n")
+-          action=(action this.goToRun)
+-        }}
+-      >
+-        <Hds::Button
+-          data-test-run-job
+-          @text="Run Job"
+-          disabled={{not (can "run job")}}
+-          title={{if (can "run job") null "You don’t have permission to run jobs"}}
+-          @route="jobs.run"
+-        />
+-      </div>
+-
+     </PH.Actions>
+   </Hds::PageHeader>
+ 
+@@ -353,9 +337,6 @@
+ 
+           <F.LinkStandalone @icon="docs" @text="Learn more about Filter Expressions" @href="https://developer.hashicorp.com/nomad/api-docs#creating-expressions" @iconPosition="trailing" />
+ 
+-          <F.LinkStandalone @icon="plus" @text="Run a New Job" @route="jobs.run"
+-            @iconPosition="trailing" />
+-
+         </A.Footer>
+       {{else}}
+         <A.Header data-test-empty-jobs-list-headline @title="No Jobs" />
+@@ -363,8 +344,6 @@
+           @text="No jobs found."
+         />
+         <A.Footer as |F|>
+-          <F.LinkStandalone @icon="plus" @text="Run a New Job" @route="jobs.run"
+-            @iconPosition="trailing" />
+         </A.Footer>
+       {{/if}}
+     </Hds::ApplicationState>
+Index: ui/app/templates/allocations/allocation/task/index.hbs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/ui/app/templates/allocations/allocation/task/index.hbs b/ui/app/templates/allocations/allocation/task/index.hbs
+--- a/ui/app/templates/allocations/allocation/task/index.hbs	(revision f237141e4d5956143a62d061373ece13e57bafe1)
++++ b/ui/app/templates/allocations/allocation/task/index.hbs	(date 1776274099623)
+@@ -55,15 +55,6 @@
+           />
+         {{/if}}
+ 
+-        <div class="two-step-button">
+-          <Exec::OpenButton
+-            @job={{this.model.task.taskGroup.job}}
+-            @taskGroup={{this.model.task.taskGroup}}
+-            @allocation={{this.model.allocation}}
+-            @task={{this.model.task}}
+-          />
+-        </div>
+-
+         <TwoStepButton
+           data-test-restart
+           @alignRight={{true}}
